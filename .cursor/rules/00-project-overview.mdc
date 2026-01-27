@@ -1,0 +1,23 @@
+---
+alwaysApply: true
+---
+
+# Project: Prompt Finder (Prompt Iteration UI)
+
+Goal:
+- Help users find the best prompt for a task by iterating:
+  1) generate N candidate prompts
+  2) run each prompt to produce outputs
+  3) display prompt + outputs
+  4) user selects best pairs and adds notes
+  5) refine and generate next batch (repeat)
+
+Modalities (must be extensible):
+- text-to-text
+- text-to-image
+- (future) image-to-text, etc.
+
+Non-goals (for MVP unless explicitly asked):
+- complex auth/roles
+- heavy multi-tenant enterprise concerns
+- real-time collaboration

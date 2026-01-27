@@ -1,0 +1,18 @@
+---
+alwaysApply: true
+---
+
+# Testing & CI Expectations
+
+Minimum bars:
+- Unit tests for core domain logic (iteration, selection, feedback shaping).
+- Integration tests for provider adapters using mocked HTTP.
+- Target coverage:
+  - >=80% overall
+  - >=90% for core domain modules
+
+Before marking a task done:
+- `npm run lint`
+- `npm run typecheck`
+- `npm run test`
+- Update README or docs when behavior changes.

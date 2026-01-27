@@ -1,0 +1,16 @@
+---
+alwaysApply: true
+---
+
+# TypeScript + Next.js Standards
+
+- TypeScript: strict mode ON. Avoid `any`. Prefer zod schemas for API payload validation.
+- Next.js App Router.
+- Keep components small; prefer server components by default, client components only when needed.
+- Styling: pick ONE approach and be consistent (e.g., Tailwind).
+- Error handling:
+  - All provider calls must return typed, structured errors.
+  - UI must display actionable error messages (no raw stack traces).
+
+Code changes:
+- Small diffs. Prefer incremental commits. If change >300 LOC, split into multiple PR-sized chunks.

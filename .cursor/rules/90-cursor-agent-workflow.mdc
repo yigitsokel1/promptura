@@ -1,0 +1,17 @@
+---
+description: 
+alwaysApply: true
+---
+
+# Cursor-specific operating instructions
+# Working with Cursor Agent (team workflow)
+
+- Keep conversations short; start a new chat when switching features or the agent becomes confused.
+- Always ask the agent to:
+  1) restate the goal
+  2) propose a plan
+  3) implement in small steps
+  4) add/update tests
+  5) update docs
+- Prefer referencing existing files instead of pasting long code into rules.
+- When unsure about architecture, create an ADR in /docs/adr/ and keep it short.

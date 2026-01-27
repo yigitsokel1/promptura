@@ -1,0 +1,21 @@
+---
+alwaysApply: true
+---
+
+# Provider Adapters (LLM/GenAI integrations)
+
+- All external model calls go through /src/providers/* adapters.
+- No provider-specific logic inside core domain or UI components.
+- Adapters must:
+  - accept typed requests (task + inputs + candidate prompt)
+  - return typed responses (output + metadata + cost/latency if available)
+  - implement retries with exponential backoff for transient errors
+  - support request id / trace id propagation
+
+Provider config:
+- Must be read from env vars only (never hardcode keys).
+- Support switching provider/model without code changes where possible.
+
+Batching:
+- When generating N candidates, prefer a single "generate candidates" call if provider supports it;
+  otherwise parallelize with safe concurrency limits.

@@ -1,0 +1,26 @@
+---
+alwaysApply: true
+---
+
+# Architecture & Boundaries (must follow)
+
+- Use a provider-agnostic core:
+  - "Core domain" defines tasks, prompt candidates, runs, and iterations.
+  - "Provider adapters" implement calling external model APIs.
+- Separate prompt-generation from output-generation:
+  - Prompt generator: produces candidate prompts (N=20 first, M=10 next).
+  - Runner: executes candidates to produce outputs.
+  - They may use the same provider, but keep interfaces separate.
+
+Data model (conceptual):
+- Project/Session
+- Task
+- Input(s): optional image + text context
+- CandidatePrompt
+- RunResult (per candidate per model)
+- Feedback: selected candidates + notes
+- Iteration: batches linked together
+
+UI responsibilities:
+- Never let UI talk directly to providers.
+- UI calls Next.js API routes (or server actions) only.
