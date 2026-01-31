@@ -4,9 +4,12 @@
  */
 
 import type { TaskSpec, ModelRef, CandidatePrompt, RunResult } from '@/src/core/types';
+import type { ModelSpec } from '@/src/core/modelSpec';
+
+import type { ModelSpec } from '@/src/core/modelSpec';
 
 /**
- * Context for prompt generation (e.g., previous iteration feedback)
+ * Context for prompt generation (e.g., previous iteration feedback, model spec)
  */
 export interface PromptGenerationContext {
   previousCandidates?: CandidatePrompt[];
@@ -16,6 +19,7 @@ export interface PromptGenerationContext {
     selected: boolean;
   }>;
   goal: string;
+  modelSpec?: ModelSpec; // ModelSpec for ModelSpec-aware prompt generation
 }
 
 /**
@@ -55,10 +59,17 @@ export interface ProviderAdapter {
    * @param task - The task specification
    * @param targetModel - The target model reference
    * @param candidates - The candidate prompts to run
+   * @param context - Optional context (e.g., ModelSpec, iterationId, modelEndpointId, submitOnly for DB persistence)
    */
   runCandidates(
     task: TaskSpec,
     targetModel: ModelRef,
-    candidates: CandidatePrompt[]
+    candidates: CandidatePrompt[],
+    context?: { 
+      modelSpec?: ModelSpec; 
+      iterationId?: string; 
+      modelEndpointId?: string;
+      submitOnly?: boolean;
+    }
   ): Promise<RunCandidatesResult>;
 }

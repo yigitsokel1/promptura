@@ -9,7 +9,7 @@ import type {
   PromptGenerationResult,
   RunCandidatesResult,
 } from './types';
-import type { TaskSpec, ModelRef, CandidatePrompt, RunResult } from '@/src/core/types';
+import type { TaskSpec, ModelRef, CandidatePrompt, RunResult, RunOutput } from '@/src/core/types';
 
 /**
  * Generate mock prompt variations
@@ -66,7 +66,7 @@ function generateRefinedMockPrompts(
   if (context?.feedback && context.feedback.length > 0) {
     const selectedCount = context.feedback.filter((f) => f.selected).length;
     return baseVariations.map(
-      (variation, i) =>
+      (variation) =>
         `${variation} (refined based on ${selectedCount} selected items)`
     );
   }
@@ -89,8 +89,8 @@ export class MockProviderAdapter implements ProviderAdapter {
       ? generateRefinedMockPrompts(task.goal, context)
       : generateMockPromptVariations(task.goal, count);
 
-    const candidates: CandidatePrompt[] = promptStrings.slice(0, count).map((prompt, i) => ({
-      id: `mock_candidate_${Date.now()}_${i}`,
+    const candidates: CandidatePrompt[] = promptStrings.slice(0, count).map((prompt, index) => ({
+      id: `mock_candidate_${Date.now()}_${index}`,
       prompt,
       generator: 'self',
     }));
@@ -100,24 +100,136 @@ export class MockProviderAdapter implements ProviderAdapter {
 
   /**
    * Generate mock results
+   * @deprecated Sprint 3: Mock provider should not be used for production
+   * This is only for development/testing. Set USE_MOCK_PROVIDERS=false to use real fal.ai
    */
   async runCandidates(
     task: TaskSpec,
-    targetModel: ModelRef,
-    candidates: CandidatePrompt[]
+    _targetModel: ModelRef,
+    candidates: CandidatePrompt[],
+    context?: { modelSpec?: unknown; iterationId?: string; modelEndpointId?: string; submitOnly?: boolean }
   ): Promise<RunCandidatesResult> {
-    const startTime = Date.now();
-
+    // For submitOnly mode, create Run records and immediately update to "done" with mock results
+    // This simulates async behavior without actually calling fal.ai
+    if (context?.submitOnly && context?.iterationId && context?.modelEndpointId) {
+      const { createRun, updateRun } = await import('@/src/db/queries');
+      
+      // Create and immediately complete Run records with mock results
+      for (const candidate of candidates) {
+        // Create Run record
+        await createRun({
+          iterationId: context.iterationId!,
+          modelEndpointId: context.modelEndpointId!,
+          candidateId: candidate.id,
+          status: 'queued',
+        });
+        
+        // Immediately update to "done" with mock result (simulates instant completion)
+        const latencyMs = Math.floor(Math.random() * 500) + 200; // 200-700ms
+        
+        // Determine output type based on task modality
+        let output: RunOutput;
+        if (task.modality === 'text-to-text') {
+          output = {
+            type: 'text',
+            text: `Mock text output for prompt: "${candidate.prompt.substring(0, 50)}${candidate.prompt.length > 50 ? '...' : ''}"`,
+          };
+        } else if (
+          task.modality === 'text-to-image' ||
+          task.modality === 'image-to-image'
+        ) {
+          output = {
+            type: 'image',
+            images: [{ url: `https://placeholder.image/mock-${candidate.id}.png` }],
+          };
+        } else if (
+          task.modality === 'text-to-video' ||
+          task.modality === 'image-to-video' ||
+          task.modality === 'video-to-video'
+        ) {
+          output = {
+            type: 'video',
+            videos: [{ url: `https://placeholder.video/mock-${candidate.id}.mp4` }],
+          };
+        } else {
+          output = {
+            type: 'text',
+            text: `Mock output for prompt: "${candidate.prompt.substring(0, 50)}${candidate.prompt.length > 50 ? '...' : ''}"`,
+          };
+        }
+        
+        // Update Run to "done" with mock result
+        await updateRun(context.iterationId!, candidate.id, {
+          status: 'done',
+          outputJson: output as unknown as Record<string, unknown>,
+          latencyMs,
+        });
+      }
+      
+      console.warn('[MockProvider] submitOnly mode - created and completed Run records with mock results. Set USE_MOCK_PROVIDERS=false to use real fal.ai');
+      return { results: [] };
+    }
     const results: RunResult[] = candidates.map((candidate, index) => {
       const latencyMs = Math.floor(Math.random() * 1000) + 100; // 100-1100ms
 
-      return {
-        candidateId: candidate.id,
-        outputText: `Mock output ${index + 1} for prompt: "${candidate.prompt.substring(0, 50)}${candidate.prompt.length > 50 ? '...' : ''}"`,
-        meta: {
-          latencyMs,
-        },
-      };
+      // Determine output type based on task modality
+      if (task.modality === 'text-to-text') {
+        return {
+          candidateId: candidate.id,
+          output: {
+            type: 'text',
+            text: `Mock text output ${index + 1} for prompt: "${candidate.prompt.substring(0, 50)}${candidate.prompt.length > 50 ? '...' : ''}"`,
+          },
+          meta: {
+            latencyMs,
+          },
+        };
+      } else if (
+        task.modality === 'text-to-image' ||
+        task.modality === 'image-to-image'
+      ) {
+        return {
+          candidateId: candidate.id,
+          output: {
+            type: 'image',
+            images: [
+              { url: `https://placeholder.image/mock-${candidate.id}.png` },
+            ],
+          },
+          meta: {
+            latencyMs,
+          },
+        };
+      } else if (
+        task.modality === 'text-to-video' ||
+        task.modality === 'image-to-video' ||
+        task.modality === 'video-to-video'
+      ) {
+        return {
+          candidateId: candidate.id,
+          output: {
+            type: 'video',
+            videos: [
+              { url: `https://placeholder.video/mock-${candidate.id}.mp4` },
+            ],
+          },
+          meta: {
+            latencyMs,
+          },
+        };
+      } else {
+        // Fallback to text
+        return {
+          candidateId: candidate.id,
+          output: {
+            type: 'text',
+            text: `Mock output ${index + 1} for prompt: "${candidate.prompt.substring(0, 50)}${candidate.prompt.length > 50 ? '...' : ''}"`,
+          },
+          meta: {
+            latencyMs,
+          },
+        };
+      }
     });
 
     return { results };

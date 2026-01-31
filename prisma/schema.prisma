@@ -1,0 +1,90 @@
+// This is your Prisma schema file,
+// learn more about it in the docs: https://pris.ly/d/prisma-schema
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model ModelEndpoint {
+  id            String    @id @default(uuid())
+  endpointId    String    @map("endpoint_id") @db.VarChar(255)
+  kind          String    @db.VarChar(50) // "model" | "workflow"
+  modality      String    @db.VarChar(50) // "text" | "image" | "video"
+  status        String    @default("pending_research") @db.VarChar(50) // "pending_research" | "active" | "disabled"
+  source        String    @default("fal.ai") @db.VarChar(100)
+  createdAt     DateTime  @default(now()) @map("created_at")
+  lastCheckedAt DateTime? @map("last_checked_at")
+
+  // Relations
+  modelSpecs    ModelSpec[]
+  researchJobs ResearchJob[]
+  runs          Run[]
+
+  @@unique([endpointId, source])
+  @@index([status])
+  @@index([source])
+  @@map("model_endpoints")
+}
+
+model ModelSpec {
+  id              String    @id @default(uuid())
+  modelEndpointId String    @map("model_endpoint_id")
+  specJson        Json      @map("spec_json")
+  schemaVersion   String    @default("1.0.0") @map("schema_version") @db.VarChar(50)
+  researchedAt    DateTime  @default(now()) @map("researched_at")
+  researchedBy    String    @default("gemini") @map("researched_by") @db.VarChar(100)
+
+  // Relations
+  modelEndpoint ModelEndpoint @relation(fields: [modelEndpointId], references: [id], onDelete: Cascade)
+
+  @@index([modelEndpointId])
+  @@index([researchedAt])
+  @@map("model_specs")
+}
+
+model ResearchJob {
+  id             String        @id @default(uuid())
+  modelEndpointId String       @map("model_endpoint_id")
+  status         String        @default("queued") @db.VarChar(50) // "queued" | "running" | "done" | "error"
+  error          String?       @db.Text
+  startedAt      DateTime?     @map("started_at")
+  finishedAt     DateTime?     @map("finished_at")
+
+  // Relations
+  modelEndpoint ModelEndpoint @relation(fields: [modelEndpointId], references: [id], onDelete: Cascade)
+
+  @@index([modelEndpointId])
+  @@index([status])
+  @@index([startedAt])
+  @@map("research_jobs")
+}
+
+model Run {
+  id              String    @id @default(uuid())
+  iterationId     String    @map("iteration_id") @db.VarChar(255)
+  modelEndpointId String    @map("model_endpoint_id")
+  candidateId     String    @map("candidate_id") @db.VarChar(255)
+  falRequestId    String?   @map("fal_request_id") @db.VarChar(255)
+  status          String    @default("queued") @db.VarChar(50) // "queued" | "running" | "done" | "error"
+  outputJson      Json?     @map("output_json")
+  latencyMs       Int?      @map("latency_ms")
+  error            String?   @db.Text
+  createdAt       DateTime  @default(now()) @map("created_at")
+  finishedAt      DateTime? @map("finished_at")
+
+  // Relations
+  modelEndpoint ModelEndpoint @relation(fields: [modelEndpointId], references: [id], onDelete: Cascade)
+
+  @@index([iterationId])
+  @@index([modelEndpointId])
+  @@index([candidateId])
+  @@index([status])
+  @@index([createdAt])
+  @@unique([iterationId, candidateId])
+  @@map("runs")
+}

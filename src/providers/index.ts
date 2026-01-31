@@ -5,18 +5,19 @@
 
 import type { ProviderAdapter } from './types';
 import type { ModelRef } from '@/src/core/types';
-import { FalAIAdapter, createFalAIAdapter } from './falai';
-import { GeminiAdapter, createGeminiAdapter } from './gemini';
+import { createFalAIAdapter } from './falai';
+import { createGeminiAdapter } from './gemini';
 import { MockProviderAdapter } from './mock';
 
 /**
  * Get provider adapter for a given model
  */
 export function getProviderAdapter(model: ModelRef): ProviderAdapter {
-  // Default to mock if not explicitly set to false
-  const useMock = process.env.USE_MOCK_PROVIDERS !== 'false';
+  // Sprint 3: Default to real providers (mock only for explicit testing)
+  const useMock = process.env.USE_MOCK_PROVIDERS === 'true';
 
   if (useMock) {
+    console.warn('[Provider] Using MockProviderAdapter. Set USE_MOCK_PROVIDERS=false to use real fal.ai');
     return new MockProviderAdapter();
   }
 
@@ -34,16 +35,11 @@ export function getProviderAdapter(model: ModelRef): ProviderAdapter {
 }
 
 /**
- * Get prompt generation adapter (for fallback scenarios)
+ * Get prompt generation adapter
+ * Sprint 3: Always use Gemini for prompt generation (no mock, no fallback)
  */
 export function getPromptGenerationAdapter(): ProviderAdapter {
-  // Default to mock if not explicitly set to false
-  const useMock = process.env.USE_MOCK_PROVIDERS !== 'false';
-
-  if (useMock) {
-    return new MockProviderAdapter();
-  }
-
-  // Default to Gemini for prompt generation fallback
+  // Sprint 3: Prompt generation is always done by Gemini
+  // No mock support - Gemini is required
   return createGeminiAdapter();
 }
