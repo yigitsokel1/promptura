@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import type { TaskSpec, ModelRef } from '@/src/core/types';
 import type { ModelSpec } from '@/src/core/modelSpec';
-import { createIteration, addCandidates, addResults } from '@/src/core/iteration/iteration';
+import { createIteration, addCandidates } from '@/src/core/iteration/iteration';
 import { generateIterationId } from '@/src/core/iteration/id-generator';
 import { getProviderAdapter, getPromptGenerationAdapter } from '@/src/providers';
 import { findModelEndpointWithSpecOnly } from '@/src/db/queries';

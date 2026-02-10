@@ -5,8 +5,8 @@
 
 import { FalAIClient } from './client';
 import type { FalAIModelMetadata } from './types';
-import type { ModelSpec, ModelInputSpec } from '@/src/core/modelSpec';
-import type { CandidatePrompt, CandidatePromptParams, CandidatePromptInputAssets, RunOutput } from '@/src/core/types';
+import type { ModelSpec } from '@/src/core/modelSpec';
+import type { CandidatePrompt, RunOutput } from '@/src/core/types';
 
 /**
  * Upload image/video to fal.ai and convert to URL

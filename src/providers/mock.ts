@@ -161,7 +161,7 @@ export class MockProviderAdapter implements ProviderAdapter {
         // Update Run to "done" with mock result
         await updateRun(context.iterationId!, candidate.id, {
           status: 'done',
-          outputJson: output as unknown as Record<string, unknown>,
+          outputJson: output,
           latencyMs,
         });
       }

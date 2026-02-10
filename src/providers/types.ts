@@ -6,8 +6,6 @@
 import type { TaskSpec, ModelRef, CandidatePrompt, RunResult } from '@/src/core/types';
 import type { ModelSpec } from '@/src/core/modelSpec';
 
-import type { ModelSpec } from '@/src/core/modelSpec';
-
 /**
  * Context for prompt generation (e.g., previous iteration feedback, model spec)
  */

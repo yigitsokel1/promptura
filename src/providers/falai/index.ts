@@ -12,7 +12,7 @@ import type {
 import type { TaskSpec, ModelRef, CandidatePrompt, RunResult, RunOutput } from '@/src/core/types';
 import type { ModelSpec } from '@/src/core/modelSpec';
 import { FalAIClient } from './client';
-import type { FalAIConfig, FalAIQueueStatus } from './types';
+import type { FalAIConfig } from './types';
 import { buildFalAIPayload, convertFalAIOutputToRunOutput } from './helpers';
 import { createRun, updateRun } from '@/src/db/queries';
 import { limitConcurrency } from '@/src/lib/concurrency';
@@ -245,7 +245,7 @@ export class FalAIAdapter implements ProviderAdapter {
         // Update Run with success result
         await updateRun(iterationId, candidateId, {
           status: 'done',
-          outputJson: output as unknown as Record<string, unknown>,
+          outputJson: output,
           latencyMs,
         });
 

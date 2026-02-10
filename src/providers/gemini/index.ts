@@ -50,7 +50,7 @@ export class GeminiAdapter implements ProviderAdapter {
       task,
       modelSpec,
       count,
-      isRefinement,
+      Boolean(isRefinement),
       context.feedback
     );
 
@@ -445,7 +445,7 @@ Return ONLY the JSON, no markdown, no code blocks, no explanations.`;
           .join('\n')
       : 'None specified';
 
-    const taskGoalText = isRefinement && feedback
+    const _taskGoalText = isRefinement && feedback
       ? `Previous iteration feedback:\n${feedback
           .filter((f) => f.selected)
           .map((f) => `- Selected candidate: ${f.note || 'No note'}`)

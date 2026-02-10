@@ -10,6 +10,9 @@ import type {
   FalAIModelMetadata,
   FalAIModelSearchResponse,
   FalAIQueueStatus,
+  FalAIQueueStatusResponse,
+  FalAIQueueSubmitResponse,
+  FalAIQueueResultResponse,
 } from './types';
 
 export class FalAIClient {

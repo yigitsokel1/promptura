@@ -20,18 +20,16 @@ export async function limitConcurrency<T, R>(
 
   for (let i = 0; i < items.length; i++) {
     const item = items[i];
-    
-    // Create a promise that processes the item and removes itself when done
-    const promise = (async () => {
+    const ref: { p: Promise<void> } = { p: null! };
+    ref.p = (async () => {
       try {
         const result = await processor(item, i);
         results[i] = result;
       } finally {
-        executing.delete(promise);
+        executing.delete(ref.p);
       }
     })();
-
-    executing.add(promise);
+    executing.add(ref.p);
 
     // If we've reached the concurrency limit, wait for one to complete
     if (executing.size >= concurrencyLimit) {
@@ -63,20 +61,18 @@ export async function limitConcurrencySettled<T, R>(
 
   for (let i = 0; i < items.length; i++) {
     const item = items[i];
-    
-    // Create a promise that processes the item and removes itself when done
-    const promise = (async () => {
+    const ref: { p: Promise<void> } = { p: null! };
+    ref.p = (async () => {
       try {
         const result = await processor(item, i);
         results[i] = { status: 'fulfilled', value: result };
       } catch (error) {
         results[i] = { status: 'rejected', reason: error };
       } finally {
-        executing.delete(promise);
+        executing.delete(ref.p);
       }
     })();
-
-    executing.add(promise);
+    executing.add(ref.p);
 
     // If we've reached the concurrency limit, wait for one to complete
     if (executing.size >= concurrencyLimit) {

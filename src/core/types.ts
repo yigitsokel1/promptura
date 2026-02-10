@@ -1,5 +1,5 @@
 /**
- * Core domain types for PromptAura
+ * Core domain types for Promptura
  * These types define the contract between UI, providers, and core logic.
  */
 

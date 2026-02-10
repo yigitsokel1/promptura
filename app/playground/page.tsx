@@ -1,7 +1,8 @@
 'use client';
 
 import { useState, useEffect, useCallback, useRef } from 'react';
-import type { TaskSpec, Modality, Iteration, CandidatePrompt, RunOutput, FeedbackItem } from '@/src/core/types';
+import Image from 'next/image';
+import type { TaskSpec, Modality, Iteration, RunOutput, FeedbackItem } from '@/src/core/types';
 import type { ModelEndpointWithRelations } from '@/src/db/types';
 
 interface IterationStatus {
@@ -58,13 +59,12 @@ export default function Playground() {
           if (!type || type === 'string') {
             const name = inp.name?.toLowerCase() || '';
             // Common image input names (but exclude parameters like "num_images", "aspect_ratio")
-            return (name === 'image' || 
-                   name === 'input_image' || 
+            return (name === 'image' ||
+                   name === 'input_image' ||
                    name === 'source_image' ||
                    name === 'img' ||
                    name === 'image_url' ||
-                   name === 'image_file') && 
-                   name !== 'prompt' &&
+                   name === 'image_file') &&
                    !name.includes('num_') &&
                    !name.includes('aspect_');
           }
@@ -282,7 +282,7 @@ export default function Playground() {
     return () => {
       clearInterval(interval);
     };
-  }, [iteration?.id, iterationStatus?.allDone, pollIterationStatus, error]); // Re-run when iteration changes or when done
+  }, [iteration, iteration?.id, iterationStatus?.allDone, pollIterationStatus, error]); // Re-run when iteration changes or when done
 
   const handleAddModel = async () => {
     const endpointId = customEndpointId.trim();
@@ -512,12 +512,15 @@ export default function Playground() {
       return (
         <div className="space-y-2">
           {output.images.map((img, idx) => (
-            <img
-              key={idx}
-              src={img.url}
-              alt={`Output ${idx + 1}`}
-              className="h-32 w-full rounded-md object-cover border border-zinc-300 dark:border-zinc-700"
-            />
+            <div key={idx} className="relative h-32 w-full overflow-hidden rounded-md border border-zinc-300 dark:border-zinc-700">
+              <Image
+                src={img.url}
+                alt={`Output ${idx + 1}`}
+                fill
+                className="object-cover"
+                unoptimized
+              />
+            </div>
           ))}
         </div>
       );
@@ -554,7 +557,7 @@ export default function Playground() {
       <main className="mx-auto max-w-7xl px-4 py-8 sm:px-6 lg:px-8">
         <div className="mb-8">
           <h1 className="text-3xl font-semibold text-black dark:text-zinc-50">
-            PromptAura Playground
+            Promptura Playground
           </h1>
           <p className="mt-2 text-sm text-zinc-600 dark:text-zinc-400">
             Generate, test, and refine prompts iteratively
@@ -855,7 +858,7 @@ export default function Playground() {
 
                     {/* Output Preview */}
                     <div className="mb-2">
-                      {renderOutputPreview(result?.output, status, result)}
+                      {renderOutputPreview(result?.output, status, result ? { error: result.error, queuePosition: result.queuePosition } : undefined)}
                     </div>
 
                     {/* Select + Note */}

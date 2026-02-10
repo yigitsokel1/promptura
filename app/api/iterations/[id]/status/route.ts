@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { findRunsByIterationId, updateRun } from '@/src/db/queries';
+import { updateRun } from '@/src/db/queries';
 import { handleApiError } from '@/src/lib/api-helpers';
 import type { RunOutput } from '@/src/core/types';
 import type { ModelSpec } from '@/src/core/modelSpec';
@@ -94,7 +94,7 @@ export async function GET(
                   console.log(`[Status] Run ${run.candidateId} failed: ${result.error}`);
                 } else if (result.output !== undefined) {
                   // Convert fal.ai output to RunOutput
-                  const modelSpec = run.modelEndpoint.modelSpecs[0]?.specJson as ModelSpec | undefined;
+                  const modelSpec = run.modelEndpoint.modelSpecs[0]?.specJson as unknown as ModelSpec | undefined;
                   const output = modelSpec 
                     ? convertFalAIOutputToRunOutput(result.output, modelSpec)
                     : { type: 'text' as const, text: JSON.stringify(result.output) };
@@ -103,7 +103,7 @@ export async function GET(
                   
                   await updateRun(iterationId, run.candidateId, {
                     status: 'done',
-                    outputJson: output as unknown as Record<string, unknown>,
+                    outputJson: output,
                     latencyMs,
                   });
                   
@@ -214,7 +214,7 @@ export async function GET(
       runs: runs.map((run) => ({
         candidateId: run.candidateId,
         status: run.status as 'queued' | 'running' | 'done' | 'error',
-        output: run.outputJson as RunOutput | undefined,
+        output: run.outputJson as unknown as RunOutput | undefined,
         latencyMs: run.latencyMs || undefined,
         error: run.error || undefined,
         // Queue position is not stored in DB, so we can't pass it here

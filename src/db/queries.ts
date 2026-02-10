@@ -3,6 +3,7 @@
  * Reduces code duplication across API routes
  */
 
+import { Prisma } from '@prisma/client';
 import { prisma } from './client';
 import type { ModelEndpointWithRelations, Run } from './types';
 import type { RunOutput } from '@/src/core/types';
@@ -128,6 +129,7 @@ export async function updateRun(
     finishedAt?: Date;
   }
 ): Promise<Run> {
+  const { outputJson, ...rest } = data;
   return prisma.run.update({
     where: {
       iterationId_candidateId: {
@@ -136,7 +138,8 @@ export async function updateRun(
       },
     },
     data: {
-      ...data,
+      ...rest,
+      outputJson: outputJson !== undefined ? (outputJson as unknown as Prisma.InputJsonValue) : undefined,
       finishedAt: data.finishedAt || (data.status === 'done' || data.status === 'error' ? new Date() : undefined),
     },
   });

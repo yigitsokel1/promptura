@@ -1,4 +1,4 @@
-# PromptAura
+# Promptura
 
 A playground to iteratively discover the best prompt for a task.
 
