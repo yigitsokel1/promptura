@@ -4,6 +4,7 @@ import { useState, useEffect, useCallback, useRef } from 'react';
 import Image from 'next/image';
 import type { TaskSpec, Modality, Iteration, RunOutput, FeedbackItem } from '@/src/core/types';
 import type { ModelEndpointWithRelations } from '@/src/db/types';
+import { shouldApplyStatusUpdate } from '@/src/lib/iterationPolling';
 
 interface IterationStatus {
   iterationId: string;
@@ -29,11 +30,16 @@ export default function Playground() {
   const [feedback, setFeedback] = useState<FeedbackItem[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [expandedPrompts, setExpandedPrompts] = useState<Set<string>>(new Set());
   const [customEndpointId, setCustomEndpointId] = useState<string>('');
   const [addingModel, setAddingModel] = useState(false);
+  /** 1 = first iteration (after Generate), 2+ = after Refine (Blok D: "Iteration 1 / 2") */
+  const [iterationIndex, setIterationIndex] = useState(1);
+  /** Lightbox: show full-size image when user clicks a thumbnail */
+  const [lightboxImageUrl, setLightboxImageUrl] = useState<string | null>(null);
   const modelsRef = useRef<ModelEndpointWithRelations[]>([]);
   const isInitialLoadRef = useRef(true);
+  /** Tracks the iteration we're showing and polling for. Prevents late poll responses from overwriting a newer iteration. */
+  const activeIterationIdRef = useRef<string | null>(null);
 
   // Helper function to map DB modality to TaskSpec Modality
   const mapModalityFromModel = (model: ModelEndpointWithRelations): Modality => {
@@ -190,7 +196,7 @@ export default function Playground() {
     return () => clearInterval(interval);
   }, [fetchModels]);
 
-  // Poll for iteration status
+  // Poll for iteration status. Idempotent: only applies updates when status.iterationId matches active iteration (ref). Prevents late/duplicate responses from overwriting state.
   const pollIterationStatus = useCallback(async (iterationId: string) => {
     try {
       const response = await fetch(`/api/iterations/${iterationId}/status`);
@@ -200,12 +206,18 @@ export default function Playground() {
         throw new Error(`Failed to fetch status: ${response.status} ${response.statusText}`);
       }
       const status: IterationStatus = await response.json();
+
+      if (!shouldApplyStatusUpdate(activeIterationIdRef.current, status)) {
+        return status.allDone;
+      }
+
       setIterationStatus(status);
 
-      // Update iteration with results
-      if (iteration) {
+      // Update iteration with results using functional update so we never overwrite based on stale closure
+      setIteration((prev) => {
+        if (!prev || prev.id !== status.iterationId) return prev;
         const updatedIteration: Iteration = {
-          ...iteration,
+          ...prev,
           results: status.runs.map((run) => ({
             candidateId: run.candidateId,
             output: run.output || { type: 'text', text: run.error || 'No output' },
@@ -214,75 +226,52 @@ export default function Playground() {
             },
           })),
         };
-        setIteration(updatedIteration);
+        return updatedIteration;
+      });
 
-        // Initialize feedback if not already initialized or if candidates changed
-        setFeedback((prev) => {
-          if (prev.length === 0 || prev.length !== updatedIteration.candidates.length) {
-            return updatedIteration.candidates.map((candidate) => ({
-              candidateId: candidate.id,
-              selected: false,
-              note: '',
-            }));
-          }
-          // Preserve existing feedback, add new candidates if any
-          const existingIds = new Set(prev.map((f) => f.candidateId));
-          const newCandidates = updatedIteration.candidates.filter(
-            (c) => !existingIds.has(c.id)
-          );
-          return [
-            ...prev,
-            ...newCandidates.map((candidate) => ({
-              candidateId: candidate.id,
-              selected: false,
-              note: '',
-            })),
-          ];
-        });
-      }
+      // Initialize or extend feedback for this iteration (idempotent: only when still active)
+      setFeedback((prev) => {
+        const candidateIds = status.runs.map((r) => r.candidateId);
+        if (prev.length === 0 || prev.length !== candidateIds.length) {
+          return candidateIds.map((candidateId) => ({ candidateId, selected: false, note: '' }));
+        }
+        const existingIds = new Set(prev.map((f) => f.candidateId));
+        const newIds = candidateIds.filter((id) => !existingIds.has(id));
+        if (newIds.length === 0) return prev;
+        return [...prev, ...newIds.map((candidateId) => ({ candidateId, selected: false, note: '' }))];
+      });
 
       return status.allDone;
     } catch (err) {
       console.error('Polling error:', err);
-      // Don't return false on error - stop polling to prevent infinite loop
-      // Error will be shown in UI, user can retry manually
       setError(err instanceof Error ? err.message : 'Failed to fetch iteration status');
-      return true; // Stop polling on error
+      return true;
     }
-  }, [iteration]);
+  }, []);
 
-  // Start/stop polling
+  // Start/stop polling. Tied to iteration.id so only one iteration is polled; cleanup clears interval when iteration changes.
   useEffect(() => {
     if (!iteration) return;
 
-    // If already done, don't poll
-    if (iterationStatus?.allDone) {
-      return;
-    }
+    if (iterationStatus?.allDone) return;
+    if (error && error.includes('Failed to fetch status')) return;
 
-    // If there's an error, don't poll (user can retry manually)
-    if (error && error.includes('Failed to fetch status')) {
-      return;
-    }
+    const iterationId = iteration.id;
 
-    // Initial poll
-    pollIterationStatus(iteration.id).catch((err) => {
-      console.error('Initial poll failed:', err);
-    });
-
-    // Set up polling interval
-    const interval = setInterval(() => {
-      pollIterationStatus(iteration.id).catch((err) => {
+    const runPoll = () => {
+      if (activeIterationIdRef.current !== iterationId) return;
+      pollIterationStatus(iterationId).catch((err) => {
         console.error('Polling failed:', err);
-        // Stop polling on error
-        clearInterval(interval);
+        clearInterval(intervalId);
       });
-    }, 2000); // Poll every 2 seconds
-
-    return () => {
-      clearInterval(interval);
     };
-  }, [iteration, iteration?.id, iterationStatus?.allDone, pollIterationStatus, error]); // Re-run when iteration changes or when done
+
+    runPoll();
+
+    const intervalId = setInterval(runPoll, 2000);
+
+    return () => clearInterval(intervalId);
+  }, [iteration, iteration?.id, iterationStatus?.allDone, pollIterationStatus, error]);
 
   const handleAddModel = async () => {
     const endpointId = customEndpointId.trim();
@@ -342,6 +331,7 @@ export default function Playground() {
 
     setLoading(true);
     setError(null);
+    activeIterationIdRef.current = null;
     setIteration(null);
     setIterationStatus(null);
     setFeedback([]);
@@ -373,6 +363,8 @@ export default function Playground() {
       }
 
       const newIteration: Iteration = await response.json();
+      activeIterationIdRef.current = newIteration.id;
+      setIterationIndex(1);
       setIteration(newIteration);
 
       // Initialize feedback
@@ -418,6 +410,18 @@ export default function Playground() {
         throw new Error('Selected model not found');
       }
 
+      // Contract v2: send selected prompts' text so Gemini can evolve them
+      const selectedPrompts = feedback
+        .filter((f) => f.selected)
+        .map((f) => {
+          const candidate = iteration.candidates.find((c) => c.id === f.candidateId);
+          return {
+            candidateId: f.candidateId,
+            prompt: candidate?.prompt ?? '',
+            note: f.note,
+          };
+        });
+
       const response = await fetch('/api/iterations/refine', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -426,6 +430,7 @@ export default function Playground() {
           modelEndpointId: selectedModelId,
           previousIterationId: iteration.id,
           feedback,
+          selectedPrompts,
         }),
       });
 
@@ -435,6 +440,8 @@ export default function Playground() {
       }
 
       const newIteration: Iteration = await response.json();
+      activeIterationIdRef.current = newIteration.id;
+      setIterationIndex((prev) => prev + 1);
       setIteration(newIteration);
       setIterationStatus(null);
 
@@ -471,19 +478,22 @@ export default function Playground() {
     return iterationStatus.runs.find((r) => r.candidateId === candidateId);
   };
 
-  const renderOutputPreview = (output: RunOutput | undefined, status: string, result?: { error?: string; queuePosition?: number }) => {
+  const renderOutputPreview = (
+    output: RunOutput | undefined,
+    status: string,
+    result?: { error?: string; queuePosition?: number },
+    onImageClick?: (url: string) => void
+  ) => {
     if (status === 'queued' || status === 'running') {
       return (
-        <div className="flex h-32 items-center justify-center rounded-md border-2 border-dashed border-zinc-300 bg-zinc-50 dark:border-zinc-700 dark:bg-zinc-800">
+        <div className="flex h-full min-h-[120px] w-full items-center justify-center rounded-lg border-2 border-dashed border-zinc-300 dark:border-zinc-600">
           <div className="text-center">
-            <div className="mb-2 h-4 w-4 animate-spin rounded-full border-2 border-zinc-400 border-t-transparent mx-auto"></div>
-            <p className="text-xs text-zinc-600 dark:text-zinc-400">
+            <div className="mx-auto mb-1.5 h-5 w-5 animate-spin rounded-full border-2 border-zinc-300 border-t-zinc-600 dark:border-zinc-600 dark:border-t-zinc-300" />
+            <p className="text-xs font-medium text-zinc-500 dark:text-zinc-400">
               {status === 'queued' ? 'Queued' : 'Running...'}
             </p>
             {result?.queuePosition !== undefined && result.queuePosition > 0 && (
-              <p className="mt-1 text-xs text-zinc-500 dark:text-zinc-500">
-                Queue: #{result.queuePosition}
-              </p>
+              <p className="mt-0.5 text-[10px] text-zinc-400">#{result.queuePosition}</p>
             )}
           </div>
         </div>
@@ -492,14 +502,13 @@ export default function Playground() {
 
     if (status === 'error') {
       return (
-        <div className="flex min-h-32 items-center justify-center rounded-md border border-red-300 bg-red-50 p-4 dark:border-red-700 dark:bg-red-900/20">
+        <div className="flex h-full min-h-[120px] w-full items-center justify-center rounded-lg border border-red-300 bg-red-50/80 p-2 dark:border-red-800 dark:bg-red-900/20">
           <div className="text-center w-full">
-            <p className="text-xs font-medium text-red-600 dark:text-red-400 mb-2">Error</p>
+            <p className="text-xs font-semibold text-red-600 dark:text-red-400">Error</p>
             {result?.error && (
-              <div className="mt-1 text-xs text-red-500 dark:text-red-300">
-                <p className="font-semibold mb-1">Validation Error:</p>
-                <p className="break-words whitespace-pre-wrap">{result.error}</p>
-              </div>
+              <p className="mt-1 wrap-break-word text-left text-[10px] text-red-600 dark:text-red-300 line-clamp-3">
+                {result.error}
+              </p>
             )}
           </div>
         </div>
@@ -509,18 +518,24 @@ export default function Playground() {
     if (!output) return null;
 
     if (output.type === 'image' && output.images) {
+      const single = output.images.length === 1;
       return (
-        <div className="space-y-2">
-          {output.images.map((img, idx) => (
-            <div key={idx} className="relative h-32 w-full overflow-hidden rounded-md border border-zinc-300 dark:border-zinc-700">
+        <div className={`grid h-full w-full ${single ? 'grid-cols-1' : 'grid-cols-2'} gap-1.5`}>
+          {output.images.slice(0, 4).map((img, idx) => (
+            <button
+              key={img.url ?? idx}
+              type="button"
+              onClick={() => onImageClick?.(img.url)}
+              className="relative aspect-square w-full min-h-0 overflow-hidden rounded-lg border border-zinc-200 bg-zinc-100 shadow-sm transition hover:shadow focus:outline-none focus:ring-2 focus:ring-zinc-400 dark:border-zinc-700 dark:bg-zinc-800"
+            >
               <Image
                 src={img.url}
                 alt={`Output ${idx + 1}`}
                 fill
-                className="object-cover"
+                className="object-cover cursor-pointer"
                 unoptimized
               />
-            </div>
+            </button>
           ))}
         </div>
       );
@@ -528,13 +543,13 @@ export default function Playground() {
 
     if (output.type === 'video' && output.videos) {
       return (
-        <div className="space-y-2">
-          {output.videos.map((vid, idx) => (
+        <div className="h-full w-full space-y-1">
+          {output.videos.slice(0, 2).map((vid, idx) => (
             <video
-              key={idx}
+              key={vid.url ?? idx}
               src={vid.url}
               controls
-              className="h-32 w-full rounded-md border border-zinc-300 dark:border-zinc-700"
+              className="h-full w-full rounded-lg border border-zinc-200 object-cover dark:border-zinc-700"
             />
           ))}
         </div>
@@ -543,7 +558,7 @@ export default function Playground() {
 
     if (output.type === 'text') {
       return (
-        <div className="max-h-32 overflow-auto rounded-md border border-zinc-300 bg-zinc-50 p-2 text-xs dark:border-zinc-700 dark:bg-zinc-800">
+        <div className="h-full w-full overflow-auto rounded-lg border border-zinc-200 bg-white px-2 py-1.5 text-xs text-zinc-700 dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-200">
           {output.text}
         </div>
       );
@@ -634,9 +649,9 @@ export default function Playground() {
 
             {/* Divider */}
             <div className="my-4 flex items-center">
-              <div className="flex-grow border-t border-zinc-300 dark:border-zinc-700"></div>
+              <div className="grow border-t border-zinc-300 dark:border-zinc-700"></div>
               <span className="mx-4 text-sm text-zinc-500 dark:text-zinc-400">or</span>
-              <div className="flex-grow border-t border-zinc-300 dark:border-zinc-700"></div>
+              <div className="grow border-t border-zinc-300 dark:border-zinc-700"></div>
             </div>
 
             {/* Add New Model */}
@@ -757,141 +772,179 @@ export default function Playground() {
         {/* Results Grid */}
         {iteration && (
           <div className="mb-8">
+            {/* Iteration header (Blok D: task, model, iteration label) */}
+            <div className="mb-4 rounded-lg border border-zinc-200 bg-white p-4 dark:border-zinc-800 dark:bg-zinc-900">
+              <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-sm">
+                <span className="font-medium text-zinc-500 dark:text-zinc-400">
+                  Iteration {iterationIndex}
+                </span>
+                <span className="text-zinc-400 dark:text-zinc-500">·</span>
+                <span className="text-zinc-700 dark:text-zinc-300" title="Task goal">
+                  {iteration.task.goal}
+                </span>
+                <span className="text-zinc-400 dark:text-zinc-500">·</span>
+                <span className="text-zinc-600 dark:text-zinc-400" title="Model">
+                  {models.find((m) => m.id === selectedModelId)?.endpointId ?? iteration.targetModel.modelId}
+                </span>
+              </div>
+            </div>
+
             <div className="mb-4 flex items-center justify-between">
               <h2 className="text-lg font-semibold text-black dark:text-zinc-50">
                 Results ({iteration.candidates.length} candidates)
               </h2>
               {iterationStatus?.allDone && (
-                <button
-                  onClick={handleRefine}
-                  disabled={loading || feedback.filter((f) => f.selected).length === 0}
-                  className="rounded-md bg-blue-600 px-4 py-2 text-sm font-medium text-white hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-50"
-                >
-                  Refine (10 candidates)
-                </button>
+                <div className="flex flex-col items-end gap-1">
+                  <span
+                    title={feedback.filter((f) => f.selected).length === 0 ? 'Select at least one result' : undefined}
+                    className="inline-block"
+                  >
+                    <button
+                      onClick={handleRefine}
+                      disabled={loading || feedback.filter((f) => f.selected).length === 0}
+                      className="rounded-md bg-blue-600 px-4 py-2 text-sm font-medium text-white hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-50"
+                    >
+                      Refine (10 candidates)
+                    </button>
+                  </span>
+                  {feedback.filter((f) => f.selected).length === 0 && (
+                    <p className="text-xs text-zinc-500 dark:text-zinc-400" role="status">
+                      Select at least one result to refine
+                    </p>
+                  )}
+                </div>
               )}
             </div>
 
-            <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
+            {/* Kart grid: her sonuç = görsel üstte (hero), prompt + aksiyonlar hemen altında */}
+            <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-3">
               {iteration.candidates.map((candidate) => {
                 const result = getCandidateResult(candidate.id);
                 const status = result?.status || 'queued';
                 const feedbackItem = feedback.find((f) => f.candidateId === candidate.id);
 
                 return (
-                  <div
+                  <article
                     key={candidate.id}
-                    className={`rounded-lg border p-4 shadow-sm ${
+                    className={`flex flex-col overflow-hidden rounded-xl border bg-white shadow-sm transition-shadow hover:shadow dark:bg-zinc-900 ${
                       feedbackItem?.selected
-                        ? 'border-blue-500 bg-blue-50 dark:border-blue-400 dark:bg-blue-900/20'
-                        : 'border-zinc-200 bg-white dark:border-zinc-800 dark:bg-zinc-900'
+                        ? 'border-blue-400 ring-2 ring-blue-400/30 dark:border-blue-500 dark:ring-blue-500/30'
+                        : 'border-zinc-200 dark:border-zinc-800'
                     }`}
                   >
-                    {/* Status Badge */}
-                    {(status === 'queued' || status === 'running' || status === 'error') && (
-                      <div className="mb-2 flex items-center gap-2">
-                        <span
-                          className={`inline-flex items-center rounded-full px-2 py-1 text-xs font-medium ${
-                            status === 'queued'
-                              ? 'bg-yellow-100 text-yellow-800 dark:bg-yellow-900/20 dark:text-yellow-200'
-                              : status === 'running'
-                              ? 'bg-blue-100 text-blue-800 dark:bg-blue-900/20 dark:text-blue-200'
-                              : 'bg-red-100 text-red-800 dark:bg-red-900/20 dark:text-red-200'
-                          }`}
-                        >
-                          {status === 'queued' ? 'Queued' : status === 'running' ? 'Running' : 'Error'}
-                        </span>
-                      </div>
-                    )}
-
-                    {/* Prompt */}
-                    <div className="mb-2">
-                      <div className="flex items-center justify-between">
-                        <p className="text-sm font-medium text-zinc-900 dark:text-zinc-50">
-                          Prompt
-                        </p>
-                        {candidate.prompt.length > 100 && (
-                          <button
-                            onClick={() => {
-                              setExpandedPrompts((prev) => {
-                                const next = new Set(prev);
-                                if (next.has(candidate.id)) {
-                                  next.delete(candidate.id);
-                                } else {
-                                  next.add(candidate.id);
-                                }
-                                return next;
-                              });
-                            }}
-                            className="text-xs text-blue-600 hover:text-blue-800 dark:text-blue-400 dark:hover:text-blue-300"
-                          >
-                            {expandedPrompts.has(candidate.id) ? 'Show less' : 'Show more'}
-                          </button>
-                        )}
-                      </div>
-                      <p
-                        className={`mt-1 text-xs text-zinc-600 dark:text-zinc-400 ${
-                          expandedPrompts.has(candidate.id) ? '' : 'line-clamp-2'
-                        }`}
-                      >
-                        {candidate.prompt}
-                      </p>
-                    </div>
-
-                    {/* Params */}
-                    {candidate.params && Object.keys(candidate.params).length > 0 && (
-                      <div className="mb-2">
-                        <p className="text-xs font-medium text-zinc-700 dark:text-zinc-300">
-                          Params
-                        </p>
-                        <div className="mt-1 text-xs text-zinc-600 dark:text-zinc-400">
-                          {Object.entries(candidate.params)
-                            .slice(0, 3)
-                            .map(([key, value]) => (
-                              <div key={key}>
-                                {key}: {String(value)}
-                              </div>
-                            ))}
+                    {/* Görsel: kartın üstü, kare alan — prompt ile aynı birimde */}
+                    <figure className="relative aspect-square w-full shrink-0 overflow-hidden bg-zinc-100 dark:bg-zinc-800/60">
+                      <div className="absolute inset-0 flex items-center justify-center p-2">
+                        <div className="h-full w-full min-h-0 min-w-0">
+                          {renderOutputPreview(
+                            result?.output,
+                            status,
+                            result ? { error: result.error, queuePosition: result.queuePosition } : undefined,
+                            setLightboxImageUrl
+                          )}
                         </div>
                       </div>
-                    )}
-
-                    {/* Output Preview */}
-                    <div className="mb-2">
-                      {renderOutputPreview(result?.output, status, result ? { error: result.error, queuePosition: result.queuePosition } : undefined)}
-                    </div>
-
-                    {/* Select + Note */}
-                    <div className="space-y-2">
-                      <label className="flex items-center gap-2">
-                        <input
-                          type="checkbox"
-                          checked={feedbackItem?.selected || false}
-                          onChange={(e) =>
-                            handleFeedbackChange(candidate.id, 'selected', e.target.checked)
-                          }
-                          disabled={!iterationStatus?.allDone}
-                          className="h-4 w-4 rounded border-zinc-300 text-zinc-600 focus:ring-zinc-500"
-                        />
-                        <span className="text-xs font-medium text-zinc-700 dark:text-zinc-300">
-                          Select
+                    </figure>
+                    {/* Caption: status, prompt, params, refine — görselin hemen altında */}
+                    <div className="flex min-h-0 flex-col p-3">
+                      <div className="mb-2 flex flex-wrap items-center gap-1.5">
+                        <span
+                          className={`inline-flex rounded-full px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide ${
+                            status === 'queued'
+                              ? 'bg-amber-100 text-amber-700 dark:bg-amber-900/40 dark:text-amber-200'
+                              : status === 'running'
+                                ? 'bg-sky-100 text-sky-700 dark:bg-sky-900/40 dark:text-sky-200'
+                                : status === 'error'
+                                  ? 'bg-red-100 text-red-700 dark:bg-red-900/40 dark:text-red-200'
+                                  : 'bg-emerald-100 text-emerald-700 dark:bg-emerald-900/40 dark:text-emerald-200'
+                          }`}
+                        >
+                          {status === 'queued' ? 'Queued' : status === 'running' ? 'Running' : status === 'error' ? 'Error' : 'Done'}
                         </span>
-                      </label>
-                      <textarea
-                        value={feedbackItem?.note || ''}
-                        onChange={(e) =>
-                          handleFeedbackChange(candidate.id, 'note', e.target.value)
-                        }
-                        placeholder="Add note..."
-                        rows={2}
-                        disabled={!iterationStatus?.allDone}
-                        className="w-full rounded-md border border-zinc-300 px-2 py-1 text-xs focus:border-zinc-500 focus:outline-none focus:ring-zinc-500 disabled:cursor-not-allowed disabled:opacity-50 dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-50"
-                      />
+                      </div>
+                      {candidate.params && Object.keys(candidate.params).length > 0 && (
+                        <div className="mb-2">
+                          <span className="mb-1 block text-[10px] font-semibold uppercase tracking-wider text-zinc-500 dark:text-zinc-400">
+                            Params
+                          </span>
+                          <div className="flex flex-wrap gap-1.5">
+                            {Object.entries(candidate.params).map(([key, value]) => (
+                              <span
+                                key={key}
+                                className="inline-flex rounded-md bg-zinc-200/90 px-2 py-0.5 font-mono text-[11px] text-zinc-700 dark:bg-zinc-700 dark:text-zinc-300"
+                                title={`${key}: ${value}`}
+                              >
+                                {key}: {String(value)}
+                              </span>
+                            ))}
+                          </div>
+                        </div>
+                      )}
+                      <div className="min-h-0 flex-1">
+                        <div className="max-h-28 overflow-y-auto rounded border border-zinc-100 bg-zinc-50/80 px-2 py-1.5 dark:border-zinc-800 dark:bg-zinc-800/50">
+                          <p className="text-[13px] leading-snug text-zinc-700 dark:text-zinc-300 whitespace-pre-wrap">
+                            {candidate.prompt}
+                          </p>
+                        </div>
+                      </div>
+                      <div className="mt-2 flex items-center gap-2 border-t border-zinc-100 pt-2 dark:border-zinc-800">
+                        <label className="flex cursor-pointer items-center gap-1.5">
+                          <input
+                            type="checkbox"
+                            checked={feedbackItem?.selected || false}
+                            onChange={(e) =>
+                              handleFeedbackChange(candidate.id, 'selected', e.target.checked)
+                            }
+                            disabled={!iterationStatus?.allDone}
+                            className="h-3.5 w-3.5 rounded border-zinc-300 text-zinc-600 dark:border-zinc-600"
+                          />
+                          <span className="text-xs font-medium text-zinc-600 dark:text-zinc-400">Refine</span>
+                        </label>
+                        <input
+                          type="text"
+                          value={feedbackItem?.note || ''}
+                          onChange={(e) =>
+                            handleFeedbackChange(candidate.id, 'note', e.target.value)
+                          }
+                          placeholder="Note"
+                          disabled={!iterationStatus?.allDone}
+                          className="min-w-0 flex-1 rounded-md border border-zinc-200 bg-zinc-50/80 px-2 py-1 text-xs placeholder-zinc-400 dark:border-zinc-700 dark:bg-zinc-800/80 dark:placeholder-zinc-500"
+                        />
+                      </div>
                     </div>
-                  </div>
+                  </article>
                 );
               })}
             </div>
+
+            {/* Lightbox: tıklanınca görsel büyük açılır */}
+            {lightboxImageUrl && (
+              <div
+                className="fixed inset-0 z-50 flex items-center justify-center bg-black/90 p-6 backdrop-blur-sm"
+                onClick={() => setLightboxImageUrl(null)}
+                role="button"
+                tabIndex={0}
+                onKeyDown={(e) => e.key === 'Escape' && setLightboxImageUrl(null)}
+                aria-label="Close"
+              >
+                <button
+                  type="button"
+                  onClick={() => setLightboxImageUrl(null)}
+                  className="absolute right-5 top-5 rounded-lg border border-white/20 bg-white/10 px-4 py-2 text-sm font-medium text-white transition hover:bg-white/20 focus:outline-none focus:ring-2 focus:ring-white/40"
+                >
+                  Close
+                </button>
+                <div className="relative h-[90vh] w-full max-w-[90vw]" onClick={(e) => e.stopPropagation()}>
+                  <Image
+                    src={lightboxImageUrl}
+                    alt="Enlarged output"
+                    fill
+                    className="rounded-lg object-contain shadow-2xl"
+                    unoptimized
+                  />
+                </div>
+              </div>
+            )}
           </div>
         )}
       </main>

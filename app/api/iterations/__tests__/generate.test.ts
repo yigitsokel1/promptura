@@ -81,8 +81,16 @@ jest.mock('@/src/db/client', () => ({
 }));
 
 describe('POST /api/iterations/generate', () => {
+  const origEnv = process.env;
+
   beforeEach(() => {
     jest.clearAllMocks();
+    process.env = { ...origEnv, TEST_CANDIDATE_COUNT: '20' };
+    delete (process.env as NodeJS.ProcessEnv).TEST_MODE;
+  });
+
+  afterEach(() => {
+    process.env = origEnv;
   });
 
   it('should generate 20 candidates with pending status (async queue pattern)', async () => {

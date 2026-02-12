@@ -64,6 +64,18 @@ model ResearchJob {
   @@map("research_jobs")
 }
 
+// Blok E: iteration observability (startedAt / finishedAt)
+model Iteration {
+  id              String    @id // same as iterationId used in Run (e.g. iter_ts_xxx)
+  modelEndpointId String?   @map("model_endpoint_id") // optional; runs have it per row
+  startedAt       DateTime  @default(now()) @map("started_at")
+  finishedAt      DateTime? @map("finished_at")
+
+  @@index([startedAt])
+  @@index([modelEndpointId])
+  @@map("iterations")
+}
+
 model Run {
   id              String    @id @default(uuid())
   iterationId     String    @map("iteration_id") @db.VarChar(255)
@@ -73,7 +85,7 @@ model Run {
   status          String    @default("queued") @db.VarChar(50) // "queued" | "running" | "done" | "error"
   outputJson      Json?     @map("output_json")
   latencyMs       Int?      @map("latency_ms")
-  error            String?   @db.Text
+  error           String?   @db.Text // Blok E: error message for observability
   createdAt       DateTime  @default(now()) @map("created_at")
   finishedAt      DateTime? @map("finished_at")
 

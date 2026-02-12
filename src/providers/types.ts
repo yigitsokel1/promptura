@@ -7,6 +7,16 @@ import type { TaskSpec, ModelRef, CandidatePrompt, RunResult } from '@/src/core/
 import type { ModelSpec } from '@/src/core/modelSpec';
 
 /**
+ * Selected prompt text + note + output summary for refine (Blok C: rich context)
+ */
+export interface SelectedPromptForRefine {
+  prompt: string;
+  note?: string;
+  /** Short summary of run output (no raw JSON) so Gemini knows what the model produced */
+  outputSummary?: string;
+}
+
+/**
  * Context for prompt generation (e.g., previous iteration feedback, model spec)
  */
 export interface PromptGenerationContext {
@@ -16,6 +26,8 @@ export interface PromptGenerationContext {
     note?: string;
     selected: boolean;
   }>;
+  /** For refine: selected prompts with text so Gemini can evolve them (Contract v2) */
+  selectedPrompts?: SelectedPromptForRefine[];
   goal: string;
   modelSpec?: ModelSpec; // ModelSpec for ModelSpec-aware prompt generation
 }

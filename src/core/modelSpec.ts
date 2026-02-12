@@ -11,6 +11,8 @@ export interface ModelInputSpec {
   max?: number;
   default?: unknown;
   description?: string;
+  /** When present, only these values are valid (e.g. image_size: ["square_hd", "square", ...]) */
+  enum?: string[];
 }
 
 export interface ModelOutputSpec {

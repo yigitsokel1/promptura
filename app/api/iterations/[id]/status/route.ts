@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { updateRun } from '@/src/db/queries';
+import { updateRun, updateIterationFinishedAt } from '@/src/db/queries';
 import { handleApiError } from '@/src/lib/api-helpers';
 import type { RunOutput } from '@/src/core/types';
 import type { ModelSpec } from '@/src/core/modelSpec';
@@ -91,7 +91,7 @@ export async function GET(
                     status: 'error',
                     error: result.error,
                   });
-                  console.log(`[Status] Run ${run.candidateId} failed: ${result.error}`);
+                  console.log(`[Status] fal.ai request id=${requestId} run ${run.candidateId} failed: ${result.error}`);
                 } else if (result.output !== undefined) {
                   // Convert fal.ai output to RunOutput
                   const modelSpec = run.modelEndpoint.modelSpecs[0]?.specJson as unknown as ModelSpec | undefined;
@@ -109,9 +109,9 @@ export async function GET(
                   
                   // Log output details for debugging
                   if (output.type === 'image' && output.images) {
-                    console.log(`[Status] Run ${run.candidateId} completed (image, ${output.images.length} image(s), ${latencyMs}ms)`);
+                    console.log(`[Status] fal.ai request id=${requestId} run ${run.candidateId} completed (image, ${output.images.length} image(s), ${latencyMs}ms)`);
                   } else {
-                    console.log(`[Status] Run ${run.candidateId} completed (${output.type}, ${latencyMs}ms)`);
+                    console.log(`[Status] fal.ai request id=${requestId} run ${run.candidateId} completed (${output.type}, ${latencyMs}ms)`);
                   }
                 } else {
                   console.warn(`[Status] Run ${run.candidateId} COMPLETED but no output or error`);
@@ -123,12 +123,12 @@ export async function GET(
                   status: 'error',
                   error: errorMessage,
                 });
-                console.log(`[Status] Run ${run.candidateId} failed: ${errorMessage}`);
+                console.log(`[Status] fal.ai request id=${requestId} run ${run.candidateId} failed: ${errorMessage}`);
               }
               // IN_QUEUE and IN_PROGRESS: no logging needed, will be checked again on next poll
             } catch (error) {
               const errorMessage = error instanceof Error ? error.message : String(error);
-              console.error(`[Status] Error checking run ${run.candidateId}:`, errorMessage);
+              console.error(`[Status] fal.ai request id=${run.falRequestId} error checking run ${run.candidateId}:`, errorMessage);
               
               // Check if this is a 422 validation error (invalid parameter values)
               // These are permanent errors that should be marked in DB
@@ -159,7 +159,7 @@ export async function GET(
                   status: 'error',
                   error: detailedError,
                 });
-                console.log(`[Status] Run ${run.candidateId} marked as error due to validation failure`);
+                console.log(`[Status] fal.ai request id=${run.falRequestId} run ${run.candidateId} marked as error (validation failure)`);
                 return; // Don't re-throw, error is handled
               }
               
@@ -209,6 +209,13 @@ export async function GET(
     // Build a map of queue positions from fal.ai status checks (if available)
     // Note: This would require storing queue position in DB or caching, but for now we'll just pass through
     // Queue position info is logged but not stored in DB - UI can show it if we pass it through
+    const allDone = runs.every((run) => run.status === 'done' || run.status === 'error');
+    if (allDone) {
+      updateIterationFinishedAt(iterationId).catch((err) =>
+        console.warn('[Status] Iteration finishedAt update failed:', err)
+      );
+    }
+
     const statusResponse: StatusResponse = {
       iterationId,
       runs: runs.map((run) => ({
@@ -217,13 +224,11 @@ export async function GET(
         output: run.outputJson as unknown as RunOutput | undefined,
         latencyMs: run.latencyMs || undefined,
         error: run.error || undefined,
-        // Queue position is not stored in DB, so we can't pass it here
-        // But we log it in the status check above
       })),
-      allDone: runs.every((run) => run.status === 'done' || run.status === 'error'),
+      allDone,
       hasErrors: runs.some((run) => run.status === 'error'),
     };
-    
+
     return NextResponse.json(statusResponse);
   } catch (error) {
     return handleApiError(error, '/api/iterations/[id]/status');

@@ -4,7 +4,7 @@ import type { ModelSpec } from '@/src/core/modelSpec';
 import { createIteration, addCandidates } from '@/src/core/iteration/iteration';
 import { generateIterationId } from '@/src/core/iteration/id-generator';
 import { getProviderAdapter, getPromptGenerationAdapter } from '@/src/providers';
-import { findModelEndpointWithSpecOnly } from '@/src/db/queries';
+import { findModelEndpointWithSpecOnly, createIterationRecord } from '@/src/db/queries';
 import { handleApiError, sourceToProvider } from '@/src/lib/api-helpers';
 
 interface GenerateRequest {
@@ -85,6 +85,9 @@ export async function POST(request: NextRequest) {
 
     // Create base iteration
     let iteration = createIteration(iterationId, task, targetModel);
+    await createIterationRecord({ id: iterationId, modelEndpointId }).catch((err) =>
+      console.warn('[Generate] Iteration record create failed (observability):', err)
+    );
 
     // Generate candidate prompts using Gemini with ModelSpec
     // Priority: TEST_CANDIDATE_COUNT > TEST_MODE > default (20)

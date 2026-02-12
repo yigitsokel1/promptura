@@ -92,16 +92,12 @@ export class FalAIAdapter implements ProviderAdapter {
           // Build payload from candidate and ModelSpec (with upload support)
           const payload = await buildFalAIPayload(candidate, modelSpec, task.inputs, this.client);
 
-          console.log(`[FalAI] Submitting job for candidate ${candidate.id} to ${targetModel.modelId}`);
-          console.log(`[FalAI] Payload:`, JSON.stringify(payload, null, 2));
-
           // Submit job to queue
           const requestId = await this.client.submitQueueJob(
             targetModel.modelId,
             payload
           );
-
-          console.log(`[FalAI] Job submitted successfully. Request ID: ${requestId} for candidate ${candidate.id}`);
+          console.log(`[FalAI] fal.ai request id=${requestId} iterationId=${iterationId} candidateId=${candidate.id} submitted`);
 
           // Update Run with falRequestId and status
           await updateRun(iterationId, candidate.id, {

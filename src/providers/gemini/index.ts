@@ -1,7 +1,7 @@
 /**
  * Gemini fallback provider adapter
- * Currently only implements PromptGen (for fallback prompt generation)
- * Also implements model research/analysis
+ * Prompt generation uses Contract v2 (promptTemplates + structured prompts with reasoning/tags).
+ * Also implements model research/analysis.
  */
 
 import type {
@@ -13,6 +13,11 @@ import type {
 import type { TaskSpec, ModelRef, CandidatePrompt } from '@/src/core/types';
 import type { ModelSpec } from '@/src/core/modelSpec';
 import type { FalAIModelMetadata } from '../falai/types';
+import {
+  generatePrompts,
+  refinePrompts,
+  type GeminiPromptsResponse,
+} from '@/src/lib/gemini/promptTemplates';
 
 export interface GeminiConfig {
   apiKey: string;
@@ -29,8 +34,8 @@ export class GeminiAdapter implements ProviderAdapter {
   }
 
   /**
-   * Generate candidate prompts using Gemini with ModelSpec awareness
-   * Uses structured output (JSON schema) to ensure type safety
+   * Generate candidate prompts using Gemini with ModelSpec awareness.
+   * Uses Contract v2: promptTemplates (generatePrompts / refinePrompts) + structured response with prompt, reasoning, tags.
    */
   async generateCandidates(
     task: TaskSpec,
@@ -43,76 +48,58 @@ export class GeminiAdapter implements ProviderAdapter {
     }
 
     const modelSpec = context.modelSpec;
-    const isRefinement = context.feedback && context.feedback.length > 0;
+    const isRefinement = Boolean(context.feedback?.length && context.selectedPrompts?.length);
 
-    // Build prompt for Gemini
-    const prompt = this.buildPromptGenerationPrompt(
-      task,
-      modelSpec,
-      count,
-      Boolean(isRefinement),
-      context.feedback
-    );
+    // Single place for prompts: promptTemplates (Contract v2)
+    const promptText = isRefinement
+      ? refinePrompts(task, modelSpec, context.selectedPrompts!, count)
+      : generatePrompts(task, modelSpec, count);
 
-    // Define JSON schema for structured output
-    // Note: Gemini API requires properties to be non-empty for object types
-    // We build params properties from ModelSpec inputs (excluding prompt and media inputs)
-    const paramsProperties: Record<string, { type: string; description?: string }> = {};
+    // Contract v2 schema: prompts[].{ prompt, reasoning, tags, params?, inputAssets? }
+    const paramsProperties: Record<string, { type: string; description?: string; enum?: string[] }> = {};
     modelSpec.inputs.forEach((input) => {
-      // Skip prompt and media inputs (they're handled separately)
-      if (input.name.toLowerCase() === 'prompt' || 
-          input.type.toLowerCase() === 'image' || 
-          input.type.toLowerCase() === 'video') {
+      if (
+        input.name.toLowerCase() === 'prompt' ||
+        input.type.toLowerCase() === 'image' ||
+        input.type.toLowerCase() === 'video'
+      ) {
         return;
       }
-      
-      // Map input types to JSON schema types
       let schemaType = 'string';
-      if (input.type === 'number') {
-        schemaType = 'number';
-      } else if (input.type === 'boolean') {
-        schemaType = 'boolean';
-      }
-      
-      paramsProperties[input.name] = {
+      if (input.type === 'number') schemaType = 'number';
+      else if (input.type === 'boolean') schemaType = 'boolean';
+      const prop: { type: string; description?: string; enum?: string[] } = {
         type: schemaType,
         description: input.description || `${input.name} parameter`,
       };
+      if (schemaType === 'string' && input.enum?.length) prop.enum = input.enum;
+      paramsProperties[input.name] = prop;
     });
 
-    // Build the schema
-    const candidateProperties: Record<string, unknown> = {
-      prompt: {
-        type: 'string',
-        description: 'The main prompt text (must be in English)',
+    const itemProperties: Record<string, unknown> = {
+      prompt: { type: 'string', description: 'Main prompt text in English' },
+      reasoning: { type: 'string', description: 'Why this prompt is effective' },
+      tags: {
+        type: 'array',
+        items: { type: 'string' },
+        description: 'Tags e.g. style, motion, lighting',
       },
     };
-
-    // Only include params if there are parameter inputs
     if (Object.keys(paramsProperties).length > 0) {
-      candidateProperties.params = {
+      itemProperties.params = {
         type: 'object',
-        description: 'Model-specific parameters (steps, cfg, seed, etc.)',
+        description: 'Model-specific parameters',
         properties: paramsProperties,
       };
     }
-
-    // Only include inputAssets if there are image/video inputs
     const hasImageInput = modelSpec.inputs.some((inp) => inp.type.toLowerCase() === 'image');
     const hasVideoInput = modelSpec.inputs.some((inp) => inp.type.toLowerCase() === 'video');
-    
     if (hasImageInput || hasVideoInput) {
       const inputAssetsProperties: Record<string, { type: string }> = {};
-      if (hasImageInput) {
-        inputAssetsProperties.image = { type: 'string' };
-      }
-      if (hasVideoInput) {
-        inputAssetsProperties.video = { type: 'string' };
-      }
-      
-      candidateProperties.inputAssets = {
+      if (hasImageInput) inputAssetsProperties.image = { type: 'string' };
+      if (hasVideoInput) inputAssetsProperties.video = { type: 'string' };
+      itemProperties.inputAssets = {
         type: 'object',
-        description: 'Input media assets if needed (image, video, etc.)',
         properties: inputAssetsProperties,
       };
     }
@@ -120,48 +107,42 @@ export class GeminiAdapter implements ProviderAdapter {
     const jsonSchema = {
       type: 'object',
       properties: {
-        candidates: {
+        prompts: {
           type: 'array',
           items: {
             type: 'object',
-            properties: candidateProperties,
-            required: ['prompt'],
+            properties: itemProperties,
+            required: ['prompt', 'reasoning', 'tags'],
           },
         },
       },
-      required: ['candidates'],
+      required: ['prompts'],
     };
 
-    // Call Gemini API with structured output
     const url = `${this.baseUrl}/v1beta/models/gemini-3-flash-preview:generateContent?key=${this.apiKey}`;
-
     const requestBody = {
-      contents: [
-        {
-          parts: [
-            {
-              text: prompt,
-            },
-          ],
-        },
-      ],
+      contents: [{ parts: [{ text: promptText }] }],
       generationConfig: {
-        temperature: isRefinement ? 0.7 : 0.9, // Higher temperature for initial generation
+        temperature: isRefinement ? 0.7 : 0.9,
         responseMimeType: 'application/json',
         responseSchema: jsonSchema,
       },
     };
 
+    const geminiRequestId = `gemini_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
+    console.log(`[Gemini] requestId=${geminiRequestId} ${isRefinement ? 'refine' : 'generate'} count=${count}`);
+
     try {
-      const timeoutMs = Math.max(60_000, parseInt(process.env.GEMINI_REQUEST_TIMEOUT_MS ?? '300000', 10) || 300000);
+      const timeoutMs = Math.max(
+        60_000,
+        parseInt(process.env.GEMINI_REQUEST_TIMEOUT_MS ?? '300000', 10) || 300000
+      );
       const controller = new AbortController();
       const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
 
       const response = await fetch(url, {
         method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-        },
+        headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(requestBody),
         signal: controller.signal,
       });
@@ -170,50 +151,49 @@ export class GeminiAdapter implements ProviderAdapter {
 
       if (!response.ok) {
         const errorText = await response.text();
-        throw new Error(
-          `Gemini API error: ${response.status} ${response.statusText} - ${errorText}`
-        );
+        console.log(`[Gemini] requestId=${geminiRequestId} response error ${response.status}`);
+        throw new Error(`Gemini API error: ${response.status} ${response.statusText} - ${errorText}`);
       }
 
       const data = await response.json();
+      let result: GeminiPromptsResponse;
 
-      // Extract JSON from response
-      let result: { candidates: Array<{ prompt: string; params?: unknown; inputAssets?: unknown }> };
-      
       if (data.candidates?.[0]?.content?.parts?.[0]?.text) {
-        // Text response (might be wrapped in code blocks)
         let jsonText = data.candidates[0].content.parts[0].text.trim();
-        
-        // Remove code blocks if present
-        if (jsonText.startsWith('```json')) {
-          jsonText = jsonText.replace(/^```json\s*/, '').replace(/\s*```$/, '');
-        } else if (jsonText.startsWith('```')) {
-          jsonText = jsonText.replace(/^```\s*/, '').replace(/\s*```$/, '');
-        }
-        
+        if (jsonText.startsWith('```json')) jsonText = jsonText.replace(/^```json\s*/, '').replace(/\s*```$/, '');
+        else if (jsonText.startsWith('```')) jsonText = jsonText.replace(/^```\s*/, '').replace(/\s*```$/, '');
         result = JSON.parse(jsonText);
       } else if (data.candidates?.[0]?.content?.parts?.[0]?.json) {
-        // Direct JSON response (when using responseSchema)
-        result = data.candidates[0].content.parts[0].json as typeof result;
+        result = data.candidates[0].content.parts[0].json as GeminiPromptsResponse;
       } else {
         throw new Error('No JSON response from Gemini');
       }
 
-      // Convert to CandidatePrompt format
-      const candidates: CandidatePrompt[] = result.candidates.slice(0, count).map((candidate, index) => ({
+      if (!result.prompts || !Array.isArray(result.prompts)) {
+        throw new Error('Gemini response missing prompts array');
+      }
+
+      console.log(`[Gemini] requestId=${geminiRequestId} response ok prompts=${result.prompts.length}`);
+
+      const candidates: CandidatePrompt[] = result.prompts.slice(0, count).map((item, index) => ({
         id: `gemini_candidate_${Date.now()}_${index}`,
-        prompt: candidate.prompt,
-        // params and inputAssets are optional - only include if present
-        params: candidate.params ? (candidate.params as CandidatePrompt['params']) : undefined,
-        inputAssets: candidate.inputAssets ? (candidate.inputAssets as CandidatePrompt['inputAssets']) : undefined,
+        prompt: item.prompt,
+        params: item.params ? (item.params as CandidatePrompt['params']) : undefined,
+        inputAssets: item.inputAssets ? (item.inputAssets as CandidatePrompt['inputAssets']) : undefined,
         generator: 'gemini-fallback',
+        reasoning: item.reasoning,
+        tags: Array.isArray(item.tags) ? item.tags : undefined,
       }));
 
       return { candidates };
     } catch (error) {
+      console.log(`[Gemini] requestId=${geminiRequestId} threw`, error instanceof Error ? error.message : String(error));
       const message = error instanceof Error ? error.message : String(error);
       const cause = error instanceof Error && error.cause instanceof Error ? error.cause.message : undefined;
-      const isTimeout = error instanceof Error && error.name === 'AbortError' || /timeout|Timeout/i.test(message) || (cause && /timeout|Timeout/i.test(cause));
+      const isTimeout =
+        (error instanceof Error && error.name === 'AbortError') ||
+        /timeout|Timeout/i.test(message) ||
+        (cause != null && /timeout|Timeout/i.test(cause));
       const hint = isTimeout
         ? ' Gemini was slow to respond. Increase GEMINI_REQUEST_TIMEOUT_MS (default 300000ms) or retry.'
         : message === 'fetch failed'
@@ -379,7 +359,7 @@ Your task:
 Return ONLY a valid JSON object with this exact structure:
 {
   "inputs": [
-    { "name": "param_name", "type": "string|number|boolean|image", "required": true/false, "min": number (optional), "max": number (optional), "description": "string (optional)" }
+    { "name": "param_name", "type": "string|number|boolean|image", "required": true/false, "min": number (optional), "max": number (optional), "description": "string (optional)", "enum": ["value1", "value2"] (optional - ONLY for string params with a fixed set of allowed values, e.g. image_size) }
   ],
   "outputs": {
     "type": "text|image|video|audio",
@@ -402,129 +382,12 @@ Return ONLY a valid JSON object with this exact structure:
 Important:
 - Be specific and accurate based on the model metadata
 - For image models, typically have "prompt" (string, required) and "steps" (number, 1-50)
+- For string parameters that accept only specific values (e.g. image_size, aspect_ratio), include an "enum" array with the exact allowed values from the API (e.g. "enum": ["square_hd", "square", "portrait_4_3", "landscape_4_3"])
 - For text models, typically have "prompt" (string, required)
 - Output format should match the modality (image models output "image" type with "url[]" format)
 - Prompt guidelines should be actionable and specific to this model
 - If workflow_steps is not applicable, use an empty array
 - recommended_ranges is optional but helpful for numeric parameters
-
-Return ONLY the JSON, no markdown, no code blocks, no explanations.`;
-  }
-
-  /**
-   * Build the prompt generation prompt for Gemini
-   * Uses ModelSpec to generate ModelSpec-aware prompts
-   */
-  private buildPromptGenerationPrompt(
-    task: TaskSpec,
-    modelSpec: ModelSpec,
-    count: number,
-    isRefinement: boolean,
-    feedback?: Array<{
-      candidateId: string;
-      note?: string;
-      selected: boolean;
-    }>
-  ): string {
-    const inputsDescription = modelSpec.inputs
-      .map((input) => {
-        let desc = `- ${input.name} (${input.type}${input.required ? ', required' : ', optional'})`;
-        if (input.min !== undefined || input.max !== undefined) {
-          desc += ` [range: ${input.min ?? 'any'} to ${input.max ?? 'any'}]`;
-        }
-        if (input.description) {
-          desc += `: ${input.description}`;
-        }
-        return desc;
-      })
-      .join('\n');
-
-    const recommendedRangesText = modelSpec.recommended_ranges
-      ? Object.entries(modelSpec.recommended_ranges)
-          .map(([param, [min, max]]) => `- ${param}: ${min} to ${max}`)
-          .join('\n')
-      : 'None specified';
-
-    const _taskGoalText = isRefinement && feedback
-      ? `Previous iteration feedback:\n${feedback
-          .filter((f) => f.selected)
-          .map((f) => `- Selected candidate: ${f.note || 'No note'}`)
-          .join('\n')}\n\nTask goal: ${task.goal}`
-      : `Task goal: ${task.goal}`;
-
-    const guidelinesText = modelSpec.prompt_guidelines
-      .map((guideline, i) => `${i + 1}. ${guideline}`)
-      .join('\n');
-
-    const outputType = modelSpec.outputs.type;
-    const outputFormat = modelSpec.outputs.format;
-
-    let feedbackContext = '';
-    if (isRefinement && feedback) {
-      const selectedFeedback = feedback.filter((f) => f.selected);
-      const selectedPrompts = selectedFeedback
-        .map((f) => {
-          const note = f.note ? ` (Note: ${f.note})` : '';
-          return `- Selected candidate ${f.candidateId}${note}`;
-        })
-        .join('\n');
-      feedbackContext = `\n\nPrevious Iteration Feedback:\nYou should refine and improve based on these selected candidates:\n${selectedPrompts}\n\nGenerate ${count} refined prompts that build upon the successful patterns from the selected candidates.`;
-    }
-
-    return `You are an expert prompt engineer. Generate ${count} diverse and effective candidate prompts for the following task.
-
-Task Goal: ${task.goal}
-Task Modality: ${task.modality}
-
-CRITICAL: All prompts must be written in English, regardless of the language used in the task goal. If the task goal is in another language, translate the intent to English and generate English prompts.
-
-Model Specifications:
-${modelSpec.summary ? `Model Summary: ${modelSpec.summary}\n` : ''}
-Model Inputs:
-${inputsDescription}
-
-Recommended Parameter Ranges:
-${recommendedRangesText}
-
-Prompt Writing Guidelines:
-${guidelinesText}
-
-Model Output:
-- Type: ${outputType}
-- Format: ${outputFormat}
-${modelSpec.outputs.description ? `- Description: ${modelSpec.outputs.description}` : ''}
-${feedbackContext}
-
-Your task:
-1. Generate ${count} diverse candidate prompts that align with the task goal
-2. Each prompt must be written in English (translate the task goal's intent to English if needed)
-3. Each prompt should follow the prompt writing guidelines
-4. For each candidate, include:
-   - prompt: The main prompt text (string, required, MUST BE IN ENGLISH)
-   - params: Model-specific parameters (object, optional) - use recommended_ranges when applicable
-   - inputAssets: Input media assets if needed (object, optional) - only if the model requires input images/videos
-
-Important:
-- ALL PROMPTS MUST BE IN ENGLISH - translate the task goal's intent if it's in another language
-- Prompts should be creative, specific, and aligned with the model's capabilities
-- Use recommended_ranges for numeric parameters (e.g., steps, cfg_scale)
-- For string parameters with specific allowed values (e.g., image_size), ONLY use the exact values specified in the input description
-- NEVER invent new values for string parameters - if a parameter has specific allowed values listed, you MUST use only those values
-- For ${outputType} outputs, ensure prompts are optimized for that output type
-- Vary the prompts significantly to explore different approaches
-- Follow all prompt_guidelines strictly
-${isRefinement ? '- Build upon successful patterns from the selected candidates' : ''}
-
-Return a JSON object with this structure:
-{
-  "candidates": [
-    {
-      "prompt": "the prompt text",
-      "params": { "steps": 30, "cfg_scale": 7.5 },
-      "inputAssets": { "image": "url or base64 if needed" }
-    }
-  ]
-}
 
 Return ONLY the JSON, no markdown, no code blocks, no explanations.`;
   }

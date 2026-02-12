@@ -2,13 +2,15 @@ import { NextRequest, NextResponse } from 'next/server';
 import type {
   TaskSpec,
   ModelRef,
+  RunOutput,
 } from '@/src/core/types';
 import type { ModelSpec } from '@/src/core/modelSpec';
 import { createIteration, addCandidates } from '@/src/core/iteration/iteration';
 import { generateIterationId } from '@/src/core/iteration/id-generator';
 import { getProviderAdapter, getPromptGenerationAdapter } from '@/src/providers';
-import { findModelEndpointWithSpecOnly, findRunsByIterationId } from '@/src/db/queries';
+import { findModelEndpointWithSpecOnly, findRunsByIterationId, createIterationRecord } from '@/src/db/queries';
 import { handleApiError, sourceToProvider } from '@/src/lib/api-helpers';
+import { buildRefineContext } from '@/src/lib/gemini/refineContext';
 
 interface RefineRequestBody {
   task: TaskSpec;
@@ -19,6 +21,8 @@ interface RefineRequestBody {
     note?: string;
     selected: boolean;
   }>;
+  /** Selected prompts with text so Gemini can evolve them (Contract v2). Must match selected feedback items. */
+  selectedPrompts?: Array<{ candidateId: string; prompt: string; note?: string }>;
 }
 
 export async function POST(request: NextRequest) {
@@ -32,7 +36,7 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    const { task, modelEndpointId, previousIterationId, feedback } = body;
+    const { task, modelEndpointId, previousIterationId, feedback, selectedPrompts: bodySelectedPrompts } = body;
 
     // Get selected feedback items
     const selectedFeedback = feedback.filter((item) => item.selected);
@@ -44,19 +48,15 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    // Fetch previous iteration runs to get selected candidates' prompts
-    const previousRuns = await findRunsByIterationId(previousIterationId);
-    
-    // Build feedback with previous prompts for context
-    const feedbackWithPrompts = feedback.map((item) => {
-      const run = previousRuns.find((r) => r.candidateId === item.candidateId);
-      return {
-        ...item,
-        previousPrompt: run?.outputJson 
-          ? JSON.stringify(run.outputJson) 
-          : undefined,
-      };
-    });
+    const previousRuns = await findRunsByIterationId(previousIterationId).catch(() => []);
+    const selectedForTemplate = buildRefineContext(
+      selectedFeedback,
+      bodySelectedPrompts,
+      previousRuns.map((r) => ({
+        candidateId: r.candidateId,
+        outputJson: r.outputJson as RunOutput | null | undefined,
+      }))
+    );
 
     // Fetch ModelEndpoint with latest ModelSpec from DB
     const modelEndpoint = await findModelEndpointWithSpecOnly(modelEndpointId);
@@ -93,14 +93,18 @@ export async function POST(request: NextRequest) {
 
     // Create base iteration
     let iteration = createIteration(iterationId, task, targetModel);
+    await createIterationRecord({ id: iterationId, modelEndpointId }).catch((err) =>
+      console.warn('[Refine] Iteration record create failed (observability):', err)
+    );
 
-    // Generate 10 refined candidate prompts using Gemini with ModelSpec and feedback
+    // Generate 10 refined candidate prompts using Gemini (Contract v2: evolve from selected prompts)
     const promptResult = await promptAdapter.generateCandidates(
       task,
       targetModel,
       10,
       {
-        feedback: feedbackWithPrompts,
+        feedback: feedback.filter((f) => f.selected),
+        selectedPrompts: selectedForTemplate,
         goal: task.goal,
         modelSpec,
       }

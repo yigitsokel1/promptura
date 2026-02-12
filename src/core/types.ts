@@ -46,7 +46,8 @@ export interface CandidatePromptInputAssets {
 
 /**
  * Candidate prompt with full parameter support
- * Can carry prompt text, model parameters, and input assets
+ * Can carry prompt text, model parameters, and input assets.
+ * reasoning and tags come from Gemini Contract v2 (optional; used for quality/UX later).
  */
 export interface CandidatePrompt {
   id: string;
@@ -54,6 +55,10 @@ export interface CandidatePrompt {
   params?: CandidatePromptParams; // Model-specific parameters (steps, cfg, seed, etc.)
   inputAssets?: CandidatePromptInputAssets; // Input media assets if needed
   generator: 'self' | 'gemini-fallback';
+  /** Why this prompt is effective (Gemini Contract v2; optional) */
+  reasoning?: string;
+  /** Tags e.g. style, motion, lighting (Gemini Contract v2; optional) */
+  tags?: string[];
 }
 
 /**
