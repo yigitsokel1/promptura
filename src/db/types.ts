@@ -25,6 +25,7 @@ export interface ModelEndpointWithRelations {
   modality: string;
   status: string;
   source: string;
+  provider: string; // "falai" | "eachlabs"
   createdAt: Date | string;
   lastCheckedAt: Date | string | null;
   modelSpecs: Array<{

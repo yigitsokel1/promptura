@@ -284,14 +284,15 @@ export class FalAIAdapter implements ProviderAdapter {
 }
 
 /**
- * Create Fal.ai adapter from environment variables
+ * Create Fal.ai adapter with given apiKey (Blok B: user key) or from env (admin/system).
  */
-export function createFalAIAdapter(): FalAIAdapter {
-  const apiKey = process.env.FAL_AI_API_KEY;
+export function createFalAIAdapter(config?: { apiKey?: string }): FalAIAdapter {
+  const apiKey = config?.apiKey ?? process.env.FAL_AI_API_KEY;
   if (!apiKey) {
-    throw new Error('FAL_AI_API_KEY environment variable is required');
+    throw new Error(
+      'FAL_AI_API_KEY is required. Add your key in Settings → Provider keys, or set FAL_AI_API_KEY for system use.'
+    );
   }
-
   return new FalAIAdapter({
     apiKey,
     baseUrl: process.env.FAL_AI_BASE_URL,

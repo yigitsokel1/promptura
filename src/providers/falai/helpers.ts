@@ -120,22 +120,44 @@ export async function buildFalAIPayload(
     // Check if candidate has this param
     if (candidate.params && inputName in candidate.params) {
       const value = candidate.params[inputName];
-      
+
+      // Enum params (e.g. image_size): fal.ai expects a string from the enum, not an object
+      if (inputSpec.enum && Array.isArray(inputSpec.enum) && inputSpec.enum.length > 0) {
+        const allowed = new Set(inputSpec.enum);
+        let strVal: string | null = null;
+        if (typeof value === 'string') {
+          strVal = value;
+        } else if (typeof value === 'object' && value !== null && !Array.isArray(value) && 'value' in value) {
+          strVal = String((value as unknown as { value: unknown }).value);
+        }
+        if (strVal != null && allowed.has(strVal)) {
+          payload[inputName] = strVal;
+        } else {
+          payload[inputName] = (inputSpec.default != null && allowed.has(String(inputSpec.default)))
+            ? String(inputSpec.default)
+            : inputSpec.enum[0];
+        }
+      }
       // Type conversion based on ModelSpec
-      if (inputType === 'number' && typeof value === 'string') {
+      else if (inputType === 'number' && typeof value === 'string') {
         payload[inputName] = parseFloat(value);
       } else if (inputType === 'boolean' && typeof value === 'string') {
         payload[inputName] = value === 'true' || value === '1';
-      } else {
-        payload[inputName] = value;
+      } else if (!inputSpec.enum) {
+        // Only pass through primitive values; if it's an object and API expects string (e.g. image_size), skip or use default
+        if (typeof value === 'object' && value !== null && inputType === 'string') {
+          payload[inputName] = inputSpec.default !== undefined ? inputSpec.default : undefined;
+        } else {
+          payload[inputName] = value;
+        }
       }
     }
     // Check if it's a prompt field (common name)
     else if (inputName === 'prompt' || inputName === 'text' || inputName === 'message') {
       payload[inputName] = candidate.prompt;
     }
-    // Check if it's an image input
-    else if (inputType === 'image' || inputName.toLowerCase().includes('image')) {
+    // Check if it's an image input (exclude param names like image_size, image_quality)
+    else if (inputType === 'image' || (inputName.toLowerCase().includes('image') && !/^image_(size|quality|format)$/.test(inputName.toLowerCase()))) {
       // Try candidate inputAssets first, then task inputs
       const imageData = candidate.inputAssets?.image || taskInputs?.image;
       if (imageData) {
@@ -170,6 +192,11 @@ export async function buildFalAIPayload(
     // Use default value if available and required
     else if (inputSpec.required && inputSpec.default !== undefined) {
       payload[inputName] = inputSpec.default;
+    }
+    // fal.ai image_size: must be an enum string; avoid sending object or invalid value
+    else if (inputName === 'image_size' && payload[inputName] === undefined) {
+      const allowed = inputSpec.enum?.length ? inputSpec.enum : ['square_hd', 'square', 'portrait_4_3', 'portrait_16_9', 'landscape_4_3', 'landscape_16_9'];
+      payload[inputName] = (inputSpec.default != null && allowed.includes(String(inputSpec.default))) ? String(inputSpec.default) : allowed[0];
     }
     // Throw error if required but not provided
     else if (inputSpec.required) {
@@ -213,6 +240,10 @@ export function convertFalAIOutputToRunOutput(
   } else if (outputType === 'image') {
     // Handle image outputs
     if (outputFormat.includes('url[]') || outputFormat === 'url[]') {
+      // Single URL string (e.g. EachLabs returns one URL)
+      if (typeof falOutput === 'string' && falOutput.trim().startsWith('http')) {
+        return { type: 'image', images: [{ url: falOutput.trim() }] };
+      }
       // Array of URLs
       if (Array.isArray(falOutput)) {
         return {

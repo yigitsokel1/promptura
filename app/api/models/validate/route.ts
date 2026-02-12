@@ -3,24 +3,34 @@ import {
   createFalAIClientFromEnv,
   extractModelMetadata,
 } from '@/src/providers/falai/helpers';
+import {
+  findEachLabsModel,
+  eachLabsModality,
+} from '@/src/providers/eachlabs/helpers';
 import { prisma } from '@/src/db/client';
 import { handleApiError } from '@/src/lib/api-helpers';
+import { runResearchJob } from '@/src/lib/research-helpers';
+import { requireAdmin, unauthorizedResponse } from '@/src/lib/auth';
+
+type SourceSlug = 'fal.ai' | 'eachlabs';
 
 interface ValidateRequest {
   endpointId: string;
+  source?: SourceSlug;
 }
 
 /**
- * Validate a fal.ai model endpoint
- * 
+ * Validate a model endpoint (fal.ai or EachLabs).
+ *
  * Flow:
- * 1. Search for model in fal.ai
- * 2. If NOT FOUND → return error
- * 3. If FOUND:
- *    - Create ModelEndpoint with status = pending_research
- *    - Start ResearchJob automatically
+ * 1. Resolve source (default fal.ai)
+ * 2. Search for model in that provider
+ * 3. If NOT FOUND → return error
+ * 4. If FOUND: create ModelEndpoint (pending_research), start ResearchJob
  */
 export async function POST(request: NextRequest) {
+  const admin = await requireAdmin();
+  if (!admin) return unauthorizedResponse();
   try {
     const body: ValidateRequest = await request.json();
 
@@ -31,14 +41,13 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    const { endpointId } = body;
+    const endpointId = body.endpointId.trim();
+    const source: SourceSlug =
+      body.source === 'eachlabs' ? 'eachlabs' : 'fal.ai';
 
-    // Check if model endpoint already exists
+    // Check if model endpoint already exists (unique on endpointId + source)
     const existing = await prisma.modelEndpoint.findFirst({
-      where: {
-        endpointId,
-        source: 'fal.ai',
-      },
+      where: { endpointId, source },
     });
 
     if (existing) {
@@ -49,28 +58,44 @@ export async function POST(request: NextRequest) {
       });
     }
 
-    // Create fal.ai client and search for model
-    const client = createFalAIClientFromEnv();
-    const modelMetadata = await client.findModel(endpointId);
+    let kind: 'model' | 'workflow';
+    let modality: 'text' | 'image' | 'video';
+    let provider: string;
 
-    if (!modelMetadata) {
-      return NextResponse.json(
-        { error: `Model endpoint not found: ${endpointId}` },
-        { status: 404 }
-      );
+    if (source === 'eachlabs') {
+      const detail = await findEachLabsModel(endpointId);
+      if (!detail) {
+        return NextResponse.json(
+          { error: `Model not found in EachLabs: ${endpointId}` },
+          { status: 404 }
+        );
+      }
+      kind = 'model';
+      modality = eachLabsModality(detail);
+      provider = 'eachlabs';
+    } else {
+      const client = createFalAIClientFromEnv();
+      const modelMetadata = await client.findModel(endpointId);
+      if (!modelMetadata) {
+        return NextResponse.json(
+          { error: `Model endpoint not found: ${endpointId}` },
+          { status: 404 }
+        );
+      }
+      const extracted = extractModelMetadata(modelMetadata);
+      kind = extracted.kind;
+      modality = extracted.modality;
+      provider = 'falai';
     }
 
-    // Extract modality and kind from metadata
-    const { modality, kind } = extractModelMetadata(modelMetadata);
-
-    // Create ModelEndpoint with status = pending_research
     const modelEndpoint = await prisma.modelEndpoint.create({
       data: {
         endpointId,
         kind,
         modality,
         status: 'pending_research',
-        source: 'fal.ai',
+        source,
+        provider,
         lastCheckedAt: new Date(),
       },
     });
@@ -84,49 +109,13 @@ export async function POST(request: NextRequest) {
       },
     });
 
-    // Automatically trigger research processing in background
-    // Fire and forget - don't wait for completion
-    // This ensures: queued → running → done, ModelSpec written, status = active
-    const baseUrl = process.env.NEXT_PUBLIC_APP_URL || 'http://localhost:3000';
-    
-    // Start research process asynchronously (non-blocking)
-    // Note: In Vercel/serverless, this works but has timeout limits
-    // For production, consider using a proper job queue (e.g., Vercel Queue, BullMQ)
-    fetch(`${baseUrl}/api/research/process`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ researchJobId: researchJob.id }),
-    })
-      .then((response) => {
-        if (!response.ok) {
-          console.error(
-            `Research process failed for job ${researchJob.id}:`,
-            response.status,
-            response.statusText
-          );
-        } else {
-          console.log(`Research process started for job ${researchJob.id}`);
-        }
-      })
-      .catch((err) => {
-        console.error(
-          `Failed to auto-process research job ${researchJob.id}:`,
-          err
-        );
-        // Update job status to error if fetch fails
-        prisma.researchJob
-          .update({
-            where: { id: researchJob.id },
-            data: {
-              status: 'error',
-              error: `Failed to trigger research: ${err instanceof Error ? err.message : 'Unknown error'}`,
-              finishedAt: new Date(),
-            },
-          })
-          .catch((updateErr) => {
-            console.error('Failed to update research job status:', updateErr);
-          });
+    // Run research in same process (no HTTP), so no auth/session issue
+    const jobId = researchJob.id;
+    setImmediate(() => {
+      runResearchJob(jobId).catch((err) => {
+        console.error(`Research job ${jobId} failed:`, err);
       });
+    });
 
     return NextResponse.json({
       success: true,

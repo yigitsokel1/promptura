@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useRef } from 'react';
 import Link from 'next/link';
 import type { ModelEndpointWithRelations } from '@/src/db/types';
 
@@ -9,6 +9,7 @@ export default function AdminModelsPage() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [statusFilter, setStatusFilter] = useState<string>('all');
+  const modelsRef = useRef<ModelEndpointWithRelations[]>([]);
 
   const fetchModels = useCallback(async () => {
     setLoading(true);
@@ -23,7 +24,9 @@ export default function AdminModelsPage() {
         throw new Error('Failed to fetch models');
       }
       const data = await response.json();
-      setModels(data.models || []);
+      const list = data.models || [];
+      modelsRef.current = list;
+      setModels(list);
     } catch (err) {
       setError(err instanceof Error ? err.message : 'An error occurred');
     } finally {
@@ -34,6 +37,18 @@ export default function AdminModelsPage() {
   useEffect(() => {
     fetchModels();
   }, [fetchModels]);
+
+  // Poll when there are models in pending_research or research job running, so list updates when research completes
+  useEffect(() => {
+    const hasPending = modelsRef.current.some(
+      (m) =>
+        m.status === 'pending_research' ||
+        (m.researchJobs?.[0] && ['queued', 'running'].includes(m.researchJobs[0].status))
+    );
+    if (!hasPending) return;
+    const interval = setInterval(fetchModels, 4000);
+    return () => clearInterval(interval);
+  }, [fetchModels, models]);
 
   const getStatusColor = (status: string) => {
     switch (status) {
@@ -68,12 +83,13 @@ export default function AdminModelsPage() {
           </Link>
         </div>
 
-        {/* Status Filter */}
-        <div className="mb-6">
-          <label className="block text-sm font-medium text-zinc-700 dark:text-zinc-300 mb-2">
-            Filter by Status
-          </label>
-          <select
+        {/* Status Filter + polling note */}
+        <div className="mb-6 flex flex-wrap items-center gap-4">
+          <div>
+            <label className="block text-sm font-medium text-zinc-700 dark:text-zinc-300 mb-2">
+              Filter by Status
+            </label>
+            <select
             value={statusFilter}
             onChange={(e) => setStatusFilter(e.target.value)}
             className="rounded-md border border-zinc-300 px-3 py-2 shadow-sm focus:border-zinc-500 focus:outline-none focus:ring-zinc-500 dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-50"
@@ -83,6 +99,12 @@ export default function AdminModelsPage() {
             <option value="disabled">Disabled</option>
             <option value="pending_research">Pending Research</option>
           </select>
+          </div>
+          {models.some((m) => m.status === 'pending_research' || m.researchJobs?.[0]?.status === 'queued' || m.researchJobs?.[0]?.status === 'running') && (
+            <p className="text-sm text-zinc-500 dark:text-zinc-400">
+              List refreshes every 4s while research is in progress.
+            </p>
+          )}
         </div>
 
         {/* Error Message */}
@@ -110,6 +132,9 @@ export default function AdminModelsPage() {
                     Endpoint ID
                   </th>
                   <th className="px-6 py-3 text-left text-xs font-medium uppercase tracking-wider text-zinc-500 dark:text-zinc-400">
+                    Source
+                  </th>
+                  <th className="px-6 py-3 text-left text-xs font-medium uppercase tracking-wider text-zinc-500 dark:text-zinc-400">
                     Kind
                   </th>
                   <th className="px-6 py-3 text-left text-xs font-medium uppercase tracking-wider text-zinc-500 dark:text-zinc-400">
@@ -117,6 +142,9 @@ export default function AdminModelsPage() {
                   </th>
                   <th className="px-6 py-3 text-left text-xs font-medium uppercase tracking-wider text-zinc-500 dark:text-zinc-400">
                     Status
+                  </th>
+                  <th className="px-6 py-3 text-left text-xs font-medium uppercase tracking-wider text-zinc-500 dark:text-zinc-400">
+                    Research
                   </th>
                   <th className="px-6 py-3 text-left text-xs font-medium uppercase tracking-wider text-zinc-500 dark:text-zinc-400">
                     Has Spec
@@ -127,39 +155,67 @@ export default function AdminModelsPage() {
                 </tr>
               </thead>
               <tbody className="divide-y divide-zinc-200 bg-white dark:divide-zinc-800 dark:bg-zinc-900">
-                {models.map((model) => (
-                  <tr key={model.id} className="hover:bg-zinc-50 dark:hover:bg-zinc-800">
-                    <td className="whitespace-nowrap px-6 py-4 text-sm font-medium text-zinc-900 dark:text-zinc-50">
-                      {model.endpointId}
-                    </td>
-                    <td className="whitespace-nowrap px-6 py-4 text-sm text-zinc-600 dark:text-zinc-400">
-                      {model.kind}
-                    </td>
-                    <td className="whitespace-nowrap px-6 py-4 text-sm text-zinc-600 dark:text-zinc-400">
-                      {model.modality}
-                    </td>
-                    <td className="whitespace-nowrap px-6 py-4 text-sm">
-                      <span
-                        className={`inline-flex rounded-full px-2 py-1 text-xs font-semibold ${getStatusColor(
-                          model.status
-                        )}`}
-                      >
-                        {model.status}
-                      </span>
-                    </td>
-                    <td className="whitespace-nowrap px-6 py-4 text-sm text-zinc-600 dark:text-zinc-400">
-                      {model.modelSpecs.length > 0 ? '✓' : '✗'}
-                    </td>
-                    <td className="whitespace-nowrap px-6 py-4 text-sm font-medium">
-                      <Link
-                        href={`/admin/models/${model.id}`}
-                        className="text-zinc-600 hover:text-zinc-900 dark:text-zinc-400 dark:hover:text-zinc-50"
-                      >
-                        View Details
-                      </Link>
-                    </td>
-                  </tr>
-                ))}
+                {models.map((model) => {
+                  const latestJob = model.researchJobs?.[0];
+                  const researchStatus = latestJob?.status ?? '—';
+                  const researchDone = researchStatus === 'done';
+                  const researchRunning = ['queued', 'running'].includes(researchStatus);
+                  return (
+                    <tr key={model.id} className="hover:bg-zinc-50 dark:hover:bg-zinc-800">
+                      <td className="whitespace-nowrap px-6 py-4 text-sm font-medium text-zinc-900 dark:text-zinc-50">
+                        {model.endpointId}
+                      </td>
+                      <td className="whitespace-nowrap px-6 py-4 text-sm text-zinc-600 dark:text-zinc-400">
+                        {model.source}
+                      </td>
+                      <td className="whitespace-nowrap px-6 py-4 text-sm text-zinc-600 dark:text-zinc-400">
+                        {model.kind}
+                      </td>
+                      <td className="whitespace-nowrap px-6 py-4 text-sm text-zinc-600 dark:text-zinc-400">
+                        {model.modality}
+                      </td>
+                      <td className="whitespace-nowrap px-6 py-4 text-sm">
+                        <span
+                          className={`inline-flex rounded-full px-2 py-1 text-xs font-semibold ${getStatusColor(
+                            model.status
+                          )}`}
+                        >
+                          {model.status}
+                        </span>
+                      </td>
+                      <td className="whitespace-nowrap px-6 py-4 text-sm text-zinc-600 dark:text-zinc-400">
+                        {researchRunning && (
+                          <span className="text-amber-600 dark:text-amber-400">⏳ {researchStatus}</span>
+                        )}
+                        {researchDone && (
+                          <span className="text-green-600 dark:text-green-400">✓ done</span>
+                        )}
+                        {researchStatus === 'error' && (
+                          <span className="text-red-600 dark:text-red-400" title={latestJob?.error ?? ''}>
+                            ✗ error
+                          </span>
+                        )}
+                        {!latestJob && model.status === 'pending_research' && (
+                          <span className="text-zinc-500">—</span>
+                        )}
+                        {!latestJob && model.status !== 'pending_research' && (
+                          <span className="text-zinc-500">—</span>
+                        )}
+                      </td>
+                      <td className="whitespace-nowrap px-6 py-4 text-sm text-zinc-600 dark:text-zinc-400">
+                        {model.modelSpecs.length > 0 ? '✓' : '✗'}
+                      </td>
+                      <td className="whitespace-nowrap px-6 py-4 text-sm font-medium">
+                        <Link
+                          href={`/admin/models/${model.id}`}
+                          className="text-zinc-600 hover:text-zinc-900 dark:text-zinc-400 dark:hover:text-zinc-50"
+                        >
+                          View Details
+                        </Link>
+                      </td>
+                    </tr>
+                  );
+                })}
               </tbody>
             </table>
           </div>

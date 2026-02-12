@@ -20,34 +20,37 @@ export default function Home() {
             What it does
           </h2>
           <p className="mt-3 text-zinc-600 dark:text-zinc-400">
-            Promptura takes a task description and a fal.ai model: it generates diverse
-            candidate prompts, runs them on the model, and shows results side by side.
+            Promptura takes a task description and a model (fal.ai or EachLabs): it generates
+            diverse candidate prompts, runs them on the model, and shows results side by side.
             You pick the outputs you like and add notes; the next round produces 10
-            refined prompts based on your feedback. Instead of trial and error, you get
-            a structured loop to find the right prompt.
+            refined prompts based on your feedback. A structured loop to find the right prompt
+            for text, image, or video generation.
           </p>
           <ul className="mt-4 space-y-2 text-sm text-zinc-600 dark:text-zinc-400">
             <li className="flex items-start gap-2">
               <span className="mt-0.5 text-amber-500 dark:text-amber-400">•</span>
-              <span><strong className="text-zinc-800 dark:text-zinc-200">Enter a task:</strong> e.g. “A woman sifting flour on a horse” — describe your goal for text or image generation.</span>
+              <span><strong className="text-zinc-800 dark:text-zinc-200">Configure API keys:</strong> In Settings, add at least one provider key (fal.ai or EachLabs). Required before using the Playground.</span>
             </li>
             <li className="flex items-start gap-2">
               <span className="mt-0.5 text-amber-500 dark:text-amber-400">•</span>
-              <span><strong className="text-zinc-800 dark:text-zinc-200">Generate 20 candidates:</strong> Gemini produces 20 different prompts tailored to your chosen model’s spec.</span>
+              <span><strong className="text-zinc-800 dark:text-zinc-200">Enter a task:</strong> e.g. “A toy car on a wooden table” — describe your goal for text or image generation.</span>
             </li>
             <li className="flex items-start gap-2">
               <span className="mt-0.5 text-amber-500 dark:text-amber-400">•</span>
-              <span><strong className="text-zinc-800 dark:text-zinc-200">Review results:</strong> Each prompt is run on fal.ai; image or text outputs appear as cards.</span>
+              <span><strong className="text-zinc-800 dark:text-zinc-200">Generate candidates:</strong> The system produces multiple prompts tailored to your chosen model; each is run and results appear as cards.</span>
             </li>
             <li className="flex items-start gap-2">
               <span className="mt-0.5 text-amber-500 dark:text-amber-400">•</span>
-              <span><strong className="text-zinc-800 dark:text-zinc-200">Select and refine:</strong> Choose the ones you like and add notes; the next round generates 10 improved prompts.</span>
+              <span><strong className="text-zinc-800 dark:text-zinc-200">Select and refine:</strong> Choose the ones you like, add notes, and generate the next round of improved prompts.</span>
             </li>
           </ul>
         </div>
 
         {/* CTA */}
-        <div className="mt-12 text-center">
+        <div className="mt-12 flex flex-col items-center gap-4 text-center">
+          <p className="text-sm text-zinc-600 dark:text-zinc-400">
+            Add your API keys in <Link href="/settings" className="font-medium text-zinc-900 underline dark:text-zinc-200">Settings</Link> first, then open the Playground.
+          </p>
           <Link
             href="/playground"
             className="inline-flex items-center gap-2 rounded-xl bg-zinc-900 px-8 py-4 text-lg font-semibold text-white shadow-lg transition hover:bg-zinc-800 focus:outline-none focus:ring-2 focus:ring-zinc-500 focus:ring-offset-2 dark:bg-white dark:text-zinc-900 dark:hover:bg-zinc-100"
@@ -55,18 +58,11 @@ export default function Home() {
             Go to Playground
             <span className="text-xl" aria-hidden>→</span>
           </Link>
-          <p className="mt-3 text-sm text-zinc-500 dark:text-zinc-400">
-            Define a task and pick a model to get started.
-          </p>
-        </div>
-
-        {/* Secondary: Admin */}
-        <div className="mt-16 flex justify-center">
           <Link
-            href="/admin/models"
-            className="text-sm font-medium text-zinc-500 underline decoration-zinc-300 underline-offset-2 hover:text-zinc-700 dark:text-zinc-400 dark:decoration-zinc-600 dark:hover:text-zinc-300"
+            href="/settings"
+            className="text-sm font-medium text-zinc-600 hover:text-zinc-900 dark:text-zinc-400 dark:hover:text-zinc-100"
           >
-            Model management (Admin)
+            Open Settings →
           </Link>
         </div>
       </main>

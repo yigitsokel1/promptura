@@ -9,8 +9,10 @@ import { createIteration, addCandidates } from '@/src/core/iteration/iteration';
 import { generateIterationId } from '@/src/core/iteration/id-generator';
 import { getProviderAdapter, getPromptGenerationAdapter } from '@/src/providers';
 import { findModelEndpointWithSpecOnly, findRunsByIterationId, createIterationRecord } from '@/src/db/queries';
-import { handleApiError, sourceToProvider } from '@/src/lib/api-helpers';
+import { handleApiError } from '@/src/lib/api-helpers';
 import { buildRefineContext } from '@/src/lib/gemini/refineContext';
+import { requireAuth, unauthorizedResponse } from '@/src/lib/auth';
+import { requireUserProviderKey, type ProviderSlug } from '@/src/lib/provider-keys';
 
 interface RefineRequestBody {
   task: TaskSpec;
@@ -27,6 +29,9 @@ interface RefineRequestBody {
 
 export async function POST(request: NextRequest) {
   try {
+    const session = await requireAuth();
+    if (!session) return unauthorizedResponse();
+
     const body: RefineRequestBody = await request.json();
 
     if (!body.task || !body.modelEndpointId || !body.previousIterationId || !body.feedback) {
@@ -78,22 +83,42 @@ export async function POST(request: NextRequest) {
     }
     const modelSpec = latestSpec.specJson as ModelSpec;
 
-    // Build ModelRef from ModelEndpoint
+    // Build ModelRef from ModelEndpoint (Blok C: use provider for execution)
     const targetModel: ModelRef = {
-      provider: sourceToProvider(modelEndpoint.source),
+      provider: modelEndpoint.provider as ModelRef['provider'],
       modelId: modelEndpoint.endpointId,
     };
 
+    // Blok D: user provider key for falai/eachlabs
+    let userApiKey: string | undefined;
+    if (targetModel.provider === 'falai' || targetModel.provider === 'eachlabs') {
+      try {
+        userApiKey = await requireUserProviderKey(
+          session.user.id,
+          targetModel.provider as ProviderSlug
+        );
+      } catch {
+        return NextResponse.json(
+          { error: 'Missing provider API key. Add your key in Settings → Provider keys.', code: 'MissingProviderKey' },
+          { status: 400 }
+        );
+      }
+    }
+
     // Always use Gemini for prompt generation (Sprint 3)
     const promptAdapter = getPromptGenerationAdapter();
-    const runnerAdapter = getProviderAdapter(targetModel);
+    const runnerAdapter = getProviderAdapter(targetModel, { apiKey: userApiKey });
 
     // Generate new iteration ID
     const iterationId = generateIterationId();
 
-    // Create base iteration
+    // Create base iteration (Blok D: userId in context for status polling)
     let iteration = createIteration(iterationId, task, targetModel);
-    await createIterationRecord({ id: iterationId, modelEndpointId }).catch((err) =>
+    await createIterationRecord({
+      id: iterationId,
+      modelEndpointId,
+      userId: session.user.id,
+    }).catch((err) =>
       console.warn('[Refine] Iteration record create failed (observability):', err)
     );
 

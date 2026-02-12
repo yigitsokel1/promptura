@@ -23,15 +23,17 @@ export function handleApiError(
 /**
  * Convert ModelEndpoint source to ModelRef provider
  */
-export function sourceToProvider(source: string): 'falai' | 'google' | 'openai' {
+export function sourceToProvider(source: string): 'falai' | 'google' | 'openai' | 'eachlabs' {
   switch (source) {
     case 'fal.ai':
       return 'falai';
+    case 'eachlabs':
+      return 'eachlabs';
     case 'google':
       return 'google';
     case 'openai':
       return 'openai';
     default:
-      return 'falai'; // Default fallback
+      return 'falai';
   }
 }

@@ -1,18 +1,20 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { findManyModelEndpointsWithSpecs } from '@/src/db/queries';
 import { handleApiError } from '@/src/lib/api-helpers';
+import { requireAdmin, unauthorizedResponse } from '@/src/lib/auth';
 
 /**
- * Get all models for admin panel
- * Returns list of ModelEndpoints with their latest specs
+ * Get all models for admin panel (ADMIN only)
  */
 export async function GET(request: NextRequest) {
+  const admin = await requireAdmin();
+  if (!admin) return unauthorizedResponse();
   try {
     const { searchParams } = new URL(request.url);
     const status = searchParams.get('status'); // Optional filter by status
 
-    const whereClause: { source?: string; status?: string } = {
-      source: 'fal.ai', // Only fal.ai models for now
+    const whereClause: { source?: string | { in: string[] }; status?: string } = {
+      source: { in: ['fal.ai', 'eachlabs'] },
     };
 
     if (status) {

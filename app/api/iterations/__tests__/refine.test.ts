@@ -9,6 +9,16 @@ import type { TaskSpec } from '@/src/core/types';
 import { prisma } from '@/src/db/client';
 import * as dbQueries from '@/src/db/queries';
 
+jest.mock('@/src/lib/auth', () => ({
+  requireAuth: jest.fn(() =>
+    Promise.resolve({ user: { id: 'test-user-id', email: 'test@example.com' } })
+  ),
+  unauthorizedResponse: jest.fn(() => new Response(null, { status: 401 })),
+}));
+jest.mock('@/src/lib/provider-keys', () => ({
+  requireUserProviderKey: jest.fn(() => Promise.resolve('mock-fal-key')),
+}));
+
 const mockModelEndpoint = {
   id: 'model-endpoint-id-123',
   endpointId: 'fal-ai/flux/dev',
@@ -16,6 +26,7 @@ const mockModelEndpoint = {
   modality: 'image',
   status: 'active',
   source: 'fal.ai',
+  provider: 'falai',
   modelSpecs: [
     {
       id: 'spec-id-123',

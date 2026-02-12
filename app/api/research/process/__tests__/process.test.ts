@@ -11,6 +11,12 @@ import { researchModelWithGemini } from '@/src/providers/gemini/helpers';
 import type { ModelSpec } from '@/src/core/modelSpec';
 
 // Mock dependencies
+jest.mock('@/src/lib/auth', () => ({
+  requireAdmin: jest.fn(() =>
+    Promise.resolve({ session: { user: {} }, user: { id: 'admin-id', email: 'admin@test.com', role: 'ADMIN' } })
+  ),
+  unauthorizedResponse: jest.fn(() => new Response(JSON.stringify({ error: 'Unauthorized' }), { status: 401 })),
+}));
 jest.mock('@/src/providers/falai/helpers');
 jest.mock('@/src/providers/gemini/helpers');
 jest.mock('@/src/db/client', () => ({
@@ -100,8 +106,9 @@ describe('POST /api/research/process', () => {
       ],
     };
 
-    // Setup mocks
+    // Setup mocks (route uses findFirst to get jobId, then runResearchJob uses findUnique with include)
     (prisma.researchJob.findFirst as jest.Mock).mockResolvedValue(mockResearchJob);
+    (prisma.researchJob.findUnique as jest.Mock).mockResolvedValue(mockResearchJob);
 
     // Mock fal.ai helper
     const mockFalClient = {
@@ -214,7 +221,7 @@ describe('POST /api/research/process', () => {
     };
 
     (prisma.researchJob.findFirst as jest.Mock).mockResolvedValue(mockResearchJob);
-    (prisma.modelEndpoint.findUnique as jest.Mock).mockResolvedValue(mockResearchJob.modelEndpoint);
+    (prisma.researchJob.findUnique as jest.Mock).mockResolvedValue(mockResearchJob);
 
     // Mock fal.ai helper to throw error
     const mockFalClient = {

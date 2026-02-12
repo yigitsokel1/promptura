@@ -1,14 +1,17 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { findIterationById, findRunsByIterationId } from '@/src/db/queries';
 import { handleApiError } from '@/src/lib/api-helpers';
+import { requireAdmin, unauthorizedResponse } from '@/src/lib/auth';
 
 /**
- * GET /api/admin/iterations/[id] — iteration detail with run status list (Blok E: observability)
+ * GET /api/admin/iterations/[id] — iteration detail (ADMIN only)
  */
 export async function GET(
   _request: NextRequest,
   { params }: { params: Promise<{ id: string }> }
 ) {
+  const admin = await requireAdmin();
+  if (!admin) return unauthorizedResponse();
   try {
     const { id: iterationId } = await params;
     if (!iterationId) {

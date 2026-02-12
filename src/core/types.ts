@@ -22,7 +22,7 @@ export interface TaskSpec {
 }
 
 export interface ModelRef {
-  provider: 'falai' | 'google' | 'openai';
+  provider: 'falai' | 'google' | 'openai' | 'eachlabs';
   modelId: string;
 }
 

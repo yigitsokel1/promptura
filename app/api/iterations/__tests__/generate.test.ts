@@ -8,6 +8,23 @@ import { NextRequest } from 'next/server';
 import type { TaskSpec } from '@/src/core/types';
 import { prisma } from '@/src/db/client';
 
+// Blok B: mock auth and provider keys so we don't pull in next-auth (ESM)
+jest.mock('@/src/lib/auth', () => ({
+  requireAuth: jest.fn(() =>
+    Promise.resolve({
+      user: { id: 'test-user-id', email: 'test@example.com' },
+    })
+  ),
+  unauthorizedResponse: jest.fn(() => new Response(null, { status: 401 })),
+}));
+const mockRequireUserProviderKey = jest.fn(
+  (_userId: string, _provider: string) => Promise.resolve('mock-fal-key')
+);
+jest.mock('@/src/lib/provider-keys', () => ({
+  requireUserProviderKey: (userId: string, provider: string) =>
+    mockRequireUserProviderKey(userId, provider),
+}));
+
 // Mock the provider module
 jest.mock('@/src/providers', () => ({
   getProviderAdapter: jest.fn(() => ({
@@ -71,17 +88,24 @@ jest.mock('@/src/providers', () => ({
   })),
 }));
 
-// Mock prisma
+// Mock prisma (Blok B: iteration.upsert for createIterationRecord)
 jest.mock('@/src/db/client', () => ({
   prisma: {
     modelEndpoint: {
       findUnique: jest.fn(),
+    },
+    iteration: {
+      upsert: jest.fn(() => Promise.resolve()),
     },
   },
 }));
 
 describe('POST /api/iterations/generate', () => {
   const origEnv = process.env;
+
+  beforeEach(() => {
+    mockRequireUserProviderKey.mockResolvedValue('mock-fal-key');
+  });
 
   beforeEach(() => {
     jest.clearAllMocks();
@@ -93,7 +117,7 @@ describe('POST /api/iterations/generate', () => {
     process.env = origEnv;
   });
 
-  it('should generate 20 candidates with pending status (async queue pattern)', async () => {
+  it('Integration: user key var → run works (200, jobs submitted)', async () => {
     const mockModelEndpoint = {
       id: 'model-endpoint-id-123',
       endpointId: 'fal-ai/flux/dev',
@@ -101,6 +125,7 @@ describe('POST /api/iterations/generate', () => {
       modality: 'image',
       status: 'active',
       source: 'fal.ai',
+      provider: 'falai',
       modelSpecs: [
         {
           id: 'spec-id-123',
@@ -140,6 +165,7 @@ describe('POST /api/iterations/generate', () => {
     expect(iteration.status).toBe('pending');
     // Results are not returned immediately - they come via polling /api/iterations/[id]/status
     expect(iteration.results).toHaveLength(0);
+    // User had provider key → generate succeeded and run submitted
 
     // Verify candidates structure
     iteration.candidates.forEach((candidate: { id: string; prompt: string; generator: string }) => {
@@ -180,6 +206,7 @@ describe('POST /api/iterations/generate', () => {
       modality: 'image',
       status: 'pending_research',
       source: 'fal.ai',
+      provider: 'falai',
       modelSpecs: [],
     };
 
@@ -214,6 +241,7 @@ describe('POST /api/iterations/generate', () => {
       modality: 'image',
       status: 'disabled',
       source: 'fal.ai',
+      provider: 'falai',
       modelSpecs: [
         {
           id: 'spec-id-123',
@@ -243,6 +271,43 @@ describe('POST /api/iterations/generate', () => {
 
     const error = await response.json();
     expect(error.error).toContain('Model is not active');
+  });
+
+  it('Integration: user key yok → 400 MissingProviderKey', async () => {
+    mockRequireUserProviderKey.mockRejectedValueOnce(new Error('Missing provider API key'));
+
+    const mockModelEndpoint = {
+      id: 'model-endpoint-id-123',
+      endpointId: 'fal-ai/flux/dev',
+      kind: 'model',
+      modality: 'image',
+      status: 'active',
+      source: 'fal.ai',
+      provider: 'falai',
+      modelSpecs: [
+        {
+          id: 'spec-id-123',
+          specJson: { inputs: [], outputs: { type: 'image' } },
+          researchedAt: new Date(),
+        },
+      ],
+    };
+    (prisma.modelEndpoint.findUnique as jest.Mock).mockResolvedValue(mockModelEndpoint);
+
+    const request = new NextRequest('http://localhost/api/iterations/generate', {
+      method: 'POST',
+      body: JSON.stringify({
+        task: { goal: 'Test', modality: 'text-to-text' },
+        modelEndpointId: 'model-endpoint-id-123',
+      }),
+      headers: { 'Content-Type': 'application/json' },
+    });
+
+    const response = await POST(request);
+    expect(response.status).toBe(400);
+    const data = await response.json();
+    expect(data.code).toBe('MissingProviderKey');
+    expect(data.error).toBeTruthy();
   });
 
   it('should return 400 for missing task', async () => {

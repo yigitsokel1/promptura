@@ -2,6 +2,7 @@
 
 import { useState, useEffect, useCallback, useRef } from 'react';
 import Image from 'next/image';
+import Link from 'next/link';
 import type { TaskSpec, Modality, Iteration, RunOutput, FeedbackItem } from '@/src/core/types';
 import type { ModelEndpointWithRelations } from '@/src/db/types';
 import { shouldApplyStatusUpdate } from '@/src/lib/iterationPolling';
@@ -31,11 +32,14 @@ export default function Playground() {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [customEndpointId, setCustomEndpointId] = useState<string>('');
+  const [addModelSource, setAddModelSource] = useState<'fal.ai' | 'eachlabs'>('fal.ai');
   const [addingModel, setAddingModel] = useState(false);
   /** 1 = first iteration (after Generate), 2+ = after Refine (Blok D: "Iteration 1 / 2") */
   const [iterationIndex, setIterationIndex] = useState(1);
   /** Lightbox: show full-size image when user clicks a thumbnail */
   const [lightboxImageUrl, setLightboxImageUrl] = useState<string | null>(null);
+  /** At least one provider (fal.ai or EachLabs) has an API key configured. null = still loading. */
+  const [hasProviderKey, setHasProviderKey] = useState<boolean | null>(null);
   const modelsRef = useRef<ModelEndpointWithRelations[]>([]);
   const isInitialLoadRef = useRef(true);
   /** Tracks the iteration we're showing and polling for. Prevents late poll responses from overwriting a newer iteration. */
@@ -124,23 +128,14 @@ export default function Playground() {
     return 'text-to-text';
   };
 
-  // Update modality when model is selected
+  // Update modality when model is selected (always use mapModalityFromModel; it falls back to DB modality when no spec)
   useEffect(() => {
     if (selectedModelId) {
       const selectedModel = models.find((m) => m.id === selectedModelId);
       if (selectedModel) {
-        // Only set modality if model has a spec (for accurate determination)
-        // If no spec, modality will be null and user will see a warning
-        if (selectedModel.modelSpecs && selectedModel.modelSpecs.length > 0) {
-          setTaskModality(mapModalityFromModel(selectedModel));
-        } else if (selectedModel.status === 'active') {
-          // Active model should have spec, but if not, use fallback
-          console.warn(`Active model ${selectedModel.endpointId} has no ModelSpec, using fallback modality`);
-          setTaskModality(mapModalityFromModel(selectedModel));
-        } else {
-          // Model is pending research, modality not yet available
-          setTaskModality(null);
-        }
+        setTaskModality(mapModalityFromModel(selectedModel));
+      } else {
+        setTaskModality(null);
       }
     } else {
       setTaskModality(null);
@@ -172,29 +167,40 @@ export default function Playground() {
     fetchModels();
   }, [fetchModels]);
 
-  // Poll for model updates if there are pending research models
+  // Check if user has at least one provider API key (for Settings warning)
   useEffect(() => {
-    const checkPendingResearch = () => {
-      return modelsRef.current.some(
-        (model) => 
-          model.status === 'pending_research' || 
-          (model.researchJobs?.[0]?.status && 
-           ['queued', 'running', 'processing'].includes(model.researchJobs[0].status))
-      );
+    let cancelled = false;
+    fetch('/api/settings/providers')
+      .then((res) => (res.ok ? res.json() : { providers: {} }))
+      .then((data) => {
+        if (cancelled) return;
+        const p = data.providers ?? {};
+        setHasProviderKey(Boolean(p.falai || p.eachlabs));
+      })
+      .catch(() => {
+        if (!cancelled) setHasProviderKey(false);
+      });
+    return () => { cancelled = true; };
+  }, []);
+
+  // Poll for model updates when there are pending research models (so list updates when research completes)
+  useEffect(() => {
+    const hasPending = models.some(
+      (m) =>
+        m.status === 'pending_research' ||
+        ['queued', 'running'].includes(m.researchJobs?.[0]?.status ?? '')
+    );
+    if (!hasPending) return;
+
+    const poll = () => fetchModels();
+    // First refresh soon, then every 3s
+    const t1 = setTimeout(poll, 2000);
+    const t2 = setInterval(poll, 3000);
+    return () => {
+      clearTimeout(t1);
+      clearInterval(t2);
     };
-
-    if (!checkPendingResearch()) {
-      return;
-    }
-
-    const interval = setInterval(() => {
-      if (checkPendingResearch()) {
-        fetchModels();
-      }
-    }, 3000);
-
-    return () => clearInterval(interval);
-  }, [fetchModels]);
+  }, [fetchModels, models]);
 
   // Poll for iteration status. Idempotent: only applies updates when status.iterationId matches active iteration (ref). Prevents late/duplicate responses from overwriting state.
   const pollIterationStatus = useCallback(async (iterationId: string) => {
@@ -276,7 +282,7 @@ export default function Playground() {
   const handleAddModel = async () => {
     const endpointId = customEndpointId.trim();
     if (!endpointId) {
-      setError('Please enter an endpoint ID');
+      setError(addModelSource === 'fal.ai' ? 'Please enter an endpoint ID' : 'Please enter a model slug');
       return;
     }
 
@@ -293,7 +299,7 @@ export default function Playground() {
         headers: {
           'Content-Type': 'application/json',
         },
-        body: JSON.stringify({ endpointId }),
+        body: JSON.stringify({ endpointId, source: addModelSource }),
       });
 
       const data = await response.json();
@@ -557,6 +563,22 @@ export default function Playground() {
     }
 
     if (output.type === 'text') {
+      // Backward compatibility: if text is a single image URL (e.g. stored before fix), render as image
+      const t = output.text?.trim() ?? '';
+      if (t.startsWith('http') && !t.includes(' ')) {
+        return (
+          <div className="relative h-full w-full rounded-lg border border-zinc-200 bg-zinc-100 dark:border-zinc-700 dark:bg-zinc-800">
+            <Image
+              src={t}
+              alt="Output"
+              fill
+              className="object-contain cursor-pointer"
+              unoptimized
+              onClick={() => onImageClick?.(t)}
+            />
+          </div>
+        );
+      }
       return (
         <div className="h-full w-full overflow-auto rounded-lg border border-zinc-200 bg-white px-2 py-1.5 text-xs text-zinc-700 dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-200">
           {output.text}
@@ -579,6 +601,25 @@ export default function Playground() {
           </p>
         </div>
 
+        {/* API keys required: show when no provider key is configured */}
+        {hasProviderKey === false && (
+          <div
+            role="alert"
+            className="mb-6 flex flex-wrap items-center gap-3 rounded-xl border-2 border-amber-400 bg-amber-50 px-5 py-4 dark:border-amber-500 dark:bg-amber-950/40"
+          >
+            <span className="text-amber-800 dark:text-amber-200">
+              Before using the Playground, add at least one provider API key (fal.ai or EachLabs) in Settings.
+              Generation and model runs will not work until a key is configured.
+            </span>
+            <Link
+              href="/settings"
+              className="shrink-0 rounded-lg bg-amber-600 px-4 py-2 text-sm font-semibold text-white transition hover:bg-amber-700 focus:outline-none focus:ring-2 focus:ring-amber-500 focus:ring-offset-2 dark:bg-amber-600 dark:hover:bg-amber-700"
+            >
+              Open Settings
+            </Link>
+          </div>
+        )}
+
         {/* Task Input */}
         <div className="mb-8 rounded-lg bg-white p-6 shadow-sm dark:bg-zinc-900">
           <h2 className="mb-4 text-lg font-semibold text-black dark:text-zinc-50">
@@ -586,7 +627,7 @@ export default function Playground() {
           </h2>
 
           <div className="space-y-4">
-            {/* Model Selection */}
+            {/* Model Selection (grouped by provider like Add model) */}
             <div>
               <label className="block text-sm font-medium text-zinc-700 dark:text-zinc-300">
                 Select Active Model
@@ -597,21 +638,28 @@ export default function Playground() {
                 className="mt-1 block w-full rounded-md border border-zinc-300 px-3 py-2 shadow-sm focus:border-zinc-500 focus:outline-none focus:ring-zinc-500 dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-50"
               >
                 <option value="">-- Select a model --</option>
-                {models
-                  .filter((m) => m.status === 'active')
-                  .map((model) => {
-                    const latestJob = model.researchJobs?.[0];
-                    const jobStatus = latestJob?.status;
-                    const isResearching = model.status === 'pending_research' || jobStatus === 'processing';
-                    
-                    return (
-                      <option key={model.id} value={model.id}>
-                        {model.endpointId} ({model.modality})
-                        {isResearching && ' [Researching...]'}
-                        {model.status === 'active' && model.modelSpecs.length === 0 && ' [No Spec]'}
-                      </option>
-                    );
-                  })}
+                {(['fal.ai', 'eachlabs'] as const).map((source) => {
+                  const sourceModels = models.filter(
+                    (m) => m.source === source && (m.status === 'active' || m.status === 'pending_research')
+                  );
+                  if (sourceModels.length === 0) return null;
+                  return (
+                    <optgroup key={source} label={source === 'fal.ai' ? 'fal.ai' : 'EachLabs'}>
+                      {sourceModels.map((model) => {
+                        const latestJob = model.researchJobs?.[0];
+                        const jobStatus = latestJob?.status;
+                        const isResearching = model.status === 'pending_research' || ['queued', 'running'].includes(jobStatus ?? '');
+                        return (
+                          <option key={model.id} value={model.id}>
+                            {model.endpointId} ({model.modality})
+                            {isResearching && ' [Researching...]'}
+                            {model.status === 'active' && model.modelSpecs.length === 0 && ' [No Spec]'}
+                          </option>
+                        );
+                      })}
+                    </optgroup>
+                  );
+                })}
               </select>
               
               {/* Show research status for selected model */}
@@ -663,9 +711,20 @@ export default function Playground() {
                 Add New Model
               </label>
               <p className="mt-1 mb-2 text-xs text-zinc-500 dark:text-zinc-400">
-                Enter a fal.ai endpoint ID (e.g., fal-ai/flux/dev) to add it to your catalog
+                {addModelSource === 'fal.ai'
+                  ? 'Enter a fal.ai endpoint ID (e.g., fal-ai/flux/dev) to add it to your catalog'
+                  : 'Enter an EachLabs model slug (e.g., nano-banana-pro-edit) to add it to your catalog'}
               </p>
-              <div className="flex gap-2">
+              <div className="flex flex-wrap gap-2 items-center">
+                <select
+                  value={addModelSource}
+                  onChange={(e) => setAddModelSource(e.target.value as 'fal.ai' | 'eachlabs')}
+                  disabled={addingModel}
+                  className="rounded-md border border-zinc-300 px-3 py-2 shadow-sm focus:border-zinc-500 focus:outline-none focus:ring-zinc-500 disabled:cursor-not-allowed dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-50"
+                >
+                  <option value="fal.ai">fal.ai</option>
+                  <option value="eachlabs">EachLabs</option>
+                </select>
                 <input
                   id="customEndpoint"
                   type="text"
@@ -676,9 +735,9 @@ export default function Playground() {
                       handleAddModel();
                     }
                   }}
-                  placeholder="fal-ai/flux/dev"
+                  placeholder={addModelSource === 'fal.ai' ? 'fal-ai/flux/dev' : 'nano-banana-pro-edit'}
                   disabled={addingModel}
-                  className="flex-1 rounded-md border border-zinc-300 px-3 py-2 shadow-sm focus:border-zinc-500 focus:outline-none focus:ring-zinc-500 disabled:cursor-not-allowed disabled:opacity-50 dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-50"
+                  className="flex-1 min-w-48 rounded-md border border-zinc-300 px-3 py-2 shadow-sm focus:border-zinc-500 focus:outline-none focus:ring-zinc-500 disabled:cursor-not-allowed disabled:opacity-50 dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-50"
                 />
                 <button
                   onClick={handleAddModel}
@@ -704,36 +763,25 @@ export default function Playground() {
               />
             </div>
 
-            {/* Modality Display (read-only, auto-determined) */}
+            {/* Modality Display (read-only; from ModelSpec or DB fallback) */}
             {selectedModelId && (() => {
               const selectedModel = models.find((m) => m.id === selectedModelId);
               const hasSpec = selectedModel?.modelSpecs && selectedModel.modelSpecs.length > 0;
-              
+              const isPendingResearch = selectedModel?.status === 'pending_research';
+
               if (!taskModality) {
-                if (selectedModel?.status === 'pending_research') {
-                  return (
-                    <div>
-                      <label className="block text-sm font-medium text-zinc-700 dark:text-zinc-300">
-                        Modality
-                      </label>
-                      <div className="mt-1 rounded-md border border-yellow-300 bg-yellow-50 px-3 py-2 text-sm text-yellow-600 dark:border-yellow-700 dark:bg-yellow-900/20 dark:text-yellow-400">
-                        Waiting for model research to complete...
-                      </div>
-                    </div>
-                  );
-                }
                 return (
                   <div>
                     <label className="block text-sm font-medium text-zinc-700 dark:text-zinc-300">
                       Modality
                     </label>
                     <div className="mt-1 rounded-md border border-red-300 bg-red-50 px-3 py-2 text-sm text-red-600 dark:border-red-700 dark:bg-red-900/20 dark:text-red-400">
-                      Unable to determine modality (ModelSpec not available)
+                      Unable to determine modality (model has no modality in catalog)
                     </div>
                   </div>
                 );
               }
-              
+
               return (
                 <div>
                   <label className="block text-sm font-medium text-zinc-700 dark:text-zinc-300">
@@ -743,9 +791,11 @@ export default function Playground() {
                     {taskModality.replace(/-/g, ' ').replace(/\b\w/g, (l) => l.toUpperCase())}
                   </div>
                   <p className="mt-1 text-xs text-zinc-500 dark:text-zinc-400">
-                    {hasSpec 
-                      ? 'Automatically determined from selected model'
-                      : 'Using fallback (ModelSpec not available - may be inaccurate)'}
+                    {hasSpec
+                      ? 'From model spec'
+                      : isPendingResearch
+                        ? 'From provider (research in progress; full spec when ready)'
+                        : 'From provider catalog (ModelSpec not yet available)'}
                   </p>
                 </div>
               );

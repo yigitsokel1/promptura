@@ -5,7 +5,10 @@ import { createIteration, addCandidates } from '@/src/core/iteration/iteration';
 import { generateIterationId } from '@/src/core/iteration/id-generator';
 import { getProviderAdapter, getPromptGenerationAdapter } from '@/src/providers';
 import { findModelEndpointWithSpecOnly, createIterationRecord } from '@/src/db/queries';
-import { handleApiError, sourceToProvider } from '@/src/lib/api-helpers';
+import { handleApiError } from '@/src/lib/api-helpers';
+import { requireAuth, unauthorizedResponse } from '@/src/lib/auth';
+import { requireUserProviderKey, type ProviderSlug } from '@/src/lib/provider-keys';
+import { checkRateLimit, getRateLimitMax, getRateLimitWindowMs } from '@/src/lib/rate-limit';
 
 interface GenerateRequest {
   task: TaskSpec;
@@ -13,6 +16,25 @@ interface GenerateRequest {
 }
 
 export async function POST(request: NextRequest) {
+  const session = await requireAuth();
+  if (!session) return unauthorizedResponse();
+
+  if (!checkRateLimit(session.user.id)) {
+    const windowSec = Math.ceil(getRateLimitWindowMs() / 1000);
+    return NextResponse.json(
+      {
+        error: `Rate limit exceeded. Max ${getRateLimitMax()} requests per ${windowSec}s.`,
+        code: 'RateLimitExceeded',
+      },
+      {
+        status: 429,
+        headers: {
+          'Retry-After': String(windowSec),
+        },
+      }
+    );
+  }
+
   try {
     const body: GenerateRequest = await request.json();
 
@@ -60,11 +82,25 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    // Build ModelRef from ModelEndpoint
+    // Build ModelRef from ModelEndpoint (Blok C: use provider for execution)
     const targetModel: ModelRef = {
-      provider: sourceToProvider(modelEndpoint.source),
+      provider: modelEndpoint.provider as ModelRef['provider'],
       modelId: modelEndpoint.endpointId,
     };
+
+    // Blok B: user provider key (required for falai/eachlabs; Gemini stays system)
+    let userApiKey: string | undefined;
+    if (targetModel.provider === 'falai' || targetModel.provider === 'eachlabs') {
+      try {
+        userApiKey = await requireUserProviderKey(
+          session.user.id,
+          targetModel.provider as ProviderSlug
+        );
+      } catch (keyError) {
+        const msg = keyError instanceof Error ? keyError.message : 'Missing provider API key';
+        return NextResponse.json({ error: msg, code: 'MissingProviderKey' }, { status: 400 });
+      }
+    }
 
     // Get ModelSpec from the latest spec
     const latestSpec = modelEndpoint.modelSpecs[0];
@@ -78,14 +114,18 @@ export async function POST(request: NextRequest) {
 
     // Always use Gemini for prompt generation (Sprint 3)
     const promptAdapter = getPromptGenerationAdapter();
-    const runnerAdapter = getProviderAdapter(targetModel);
+    const runnerAdapter = getProviderAdapter(targetModel, { apiKey: userApiKey });
 
     // Generate iteration ID
     const iterationId = generateIterationId();
 
-    // Create base iteration
+    // Create base iteration (Blok B: store userId for status polling)
     let iteration = createIteration(iterationId, task, targetModel);
-    await createIterationRecord({ id: iterationId, modelEndpointId }).catch((err) =>
+    await createIterationRecord({
+      id: iterationId,
+      modelEndpointId,
+      userId: session.user.id,
+    }).catch((err) =>
       console.warn('[Generate] Iteration record create failed (observability):', err)
     );
 

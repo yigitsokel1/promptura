@@ -5,29 +5,47 @@
 
 import type { ProviderAdapter } from './types';
 import type { ModelRef } from '@/src/core/types';
-import { createFalAIAdapter } from './falai';
 import { createGeminiAdapter } from './gemini';
 import { MockProviderAdapter } from './mock';
+import { executionProviderFactory } from './execution';
+import type { ExecutionProviderSlug } from './execution';
+import { ExecutionRunnerAdapter } from './execution-runner';
 
 /**
- * Get provider adapter for a given model
+ * Get provider adapter for a given model.
+ * options.apiKey: Blok B — user's key for falai/eachlabs; required for execution providers.
  */
-export function getProviderAdapter(model: ModelRef): ProviderAdapter {
-  // Sprint 3: Default to real providers (mock only for explicit testing)
+export function getProviderAdapter(
+  model: ModelRef,
+  options?: { apiKey?: string }
+): ProviderAdapter {
   const useMock = process.env.USE_MOCK_PROVIDERS === 'true';
 
   if (useMock) {
-    console.warn('[Provider] Using MockProviderAdapter. Set USE_MOCK_PROVIDERS=false to use real fal.ai');
+    console.warn('[Provider] Using MockProviderAdapter. Set USE_MOCK_PROVIDERS=false to use real providers');
     return new MockProviderAdapter();
   }
 
   switch (model.provider) {
     case 'falai':
-      return createFalAIAdapter();
+    case 'eachlabs': {
+      const apiKey =
+        options?.apiKey ??
+        (model.provider === 'falai' ? process.env.FAL_AI_API_KEY : process.env.EACHLABS_API_KEY);
+      if (!apiKey) {
+        throw new Error(
+          'API key for this provider is required. Add your key in Settings → Provider keys.'
+        );
+      }
+      const executionProvider = executionProviderFactory(
+        model.provider as ExecutionProviderSlug,
+        apiKey
+      );
+      return new ExecutionRunnerAdapter(executionProvider);
+    }
     case 'google':
       return createGeminiAdapter();
     case 'openai':
-      // TODO: Implement OpenAI adapter
       throw new Error('OpenAI adapter not yet implemented');
     default:
       throw new Error(`Unknown provider: ${model.provider}`);

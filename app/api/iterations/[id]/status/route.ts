@@ -1,11 +1,14 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { updateRun, updateIterationFinishedAt } from '@/src/db/queries';
+import { updateRun, updateIterationFinishedAt, findIterationById } from '@/src/db/queries';
 import { handleApiError } from '@/src/lib/api-helpers';
 import type { RunOutput } from '@/src/core/types';
 import type { ModelSpec } from '@/src/core/modelSpec';
-import { createFalAIClientFromEnv, convertFalAIOutputToRunOutput } from '@/src/providers/falai/helpers';
+import { executionProviderFactory } from '@/src/providers/execution';
+import type { ExecutionProviderSlug } from '@/src/providers/execution';
 import { prisma } from '@/src/db/client';
 import { limitConcurrencySettled } from '@/src/lib/concurrency';
+import { requireUserProviderKey, type ProviderSlug } from '@/src/lib/provider-keys';
+import { requireAuth, unauthorizedResponse } from '@/src/lib/auth';
 
 interface StatusResponse {
   iterationId: string;
@@ -26,6 +29,9 @@ export async function GET(
   { params }: { params: Promise<{ id: string }> }
 ) {
   try {
+    const session = await requireAuth();
+    if (!session) return unauthorizedResponse();
+
     const { id: iterationId } = await params;
 
     if (!iterationId) {
@@ -33,6 +39,12 @@ export async function GET(
         { error: 'Missing iterationId' },
         { status: 400 }
       );
+    }
+
+    // Ensure iteration belongs to current user (userId in request context)
+    const iterationRecord = await findIterationById(iterationId);
+    if (iterationRecord?.userId && iterationRecord.userId !== session.user.id) {
+      return NextResponse.json({ error: 'Forbidden' }, { status: 403 });
     }
 
     // Fetch runs from DB (with ModelEndpoint relation for endpointId and ModelSpec)
@@ -64,110 +76,94 @@ export async function GET(
         }
       }
 
-      // Check status of "running" runs with falRequestId from fal.ai
+      // Check status of "running" runs (Blok C: use ExecutionProvider from factory)
       const runningRuns = runs.filter((run) => run.status === 'running' && run.falRequestId && run.modelEndpoint);
       if (runningRuns.length > 0) {
-        const falClient = createFalAIClientFromEnv();
-        const FAL_AI_CONCURRENCY_LIMIT = 10;
-        
-        // Process with concurrency limit (10 concurrent requests max)
+        const iterationRecord = await findIterationById(iterationId);
+        const userId = iterationRecord?.userId ?? null;
+        const providerSlug = (runningRuns[0].modelEndpoint?.provider ?? 'falai') as ExecutionProviderSlug;
+        if (!userId) {
+          return NextResponse.json(
+            { error: 'This iteration cannot be polled (missing user context). Start a new run from the playground.' },
+            { status: 400 }
+          );
+        }
+        let apiKey: string;
+        try {
+          apiKey = await requireUserProviderKey(userId, providerSlug as ProviderSlug);
+        } catch (keyError) {
+          const msg = keyError instanceof Error ? keyError.message : 'Missing provider API key';
+          return NextResponse.json({ error: msg, code: 'MissingProviderKey' }, { status: 400 });
+        }
+        const executionProvider = executionProviderFactory(providerSlug, apiKey);
+        const CONCURRENCY = 10;
+
         await limitConcurrencySettled(
           runningRuns,
           async (run) => {
             try {
-              const modelId = run.modelEndpoint.endpointId;
+              const endpointId = run.modelEndpoint!.endpointId;
               const requestId = run.falRequestId!;
-              
-              // Check status from fal.ai
-              const statusResponse = await falClient.getQueueJobStatus(modelId, requestId);
-              const falStatus = statusResponse.status;
-              
-              if (falStatus === 'COMPLETED') {
-                // Get result and update DB
-                const result = await falClient.getQueueJobResult(modelId, requestId);
-                
-                if (result.error) {
+              const status = await executionProvider.getStatus(endpointId, requestId);
+
+              if (status === 'completed' || status === 'failed') {
+                const result = await executionProvider.getResult(endpointId, requestId);
+                const modelSpec = run.modelEndpoint!.modelSpecs[0]?.specJson as unknown as ModelSpec | undefined;
+
+                if (result.error || status === 'failed') {
                   await updateRun(iterationId, run.candidateId, {
                     status: 'error',
-                    error: result.error,
+                    error: result.error ?? 'Job failed',
                   });
-                  console.log(`[Status] fal.ai request id=${requestId} run ${run.candidateId} failed: ${result.error}`);
-                } else if (result.output !== undefined) {
-                  // Convert fal.ai output to RunOutput
-                  const modelSpec = run.modelEndpoint.modelSpecs[0]?.specJson as unknown as ModelSpec | undefined;
-                  const output = modelSpec 
-                    ? convertFalAIOutputToRunOutput(result.output, modelSpec)
-                    : { type: 'text' as const, text: JSON.stringify(result.output) };
-                  
+                } else if (result.output !== undefined && modelSpec) {
+                  const output = executionProvider.convertToRunOutput(result.output, modelSpec);
                   const latencyMs = Date.now() - run.createdAt.getTime();
-                  
                   await updateRun(iterationId, run.candidateId, {
                     status: 'done',
                     outputJson: output,
                     latencyMs,
                   });
-                  
-                  // Log output details for debugging
-                  if (output.type === 'image' && output.images) {
-                    console.log(`[Status] fal.ai request id=${requestId} run ${run.candidateId} completed (image, ${output.images.length} image(s), ${latencyMs}ms)`);
-                  } else {
-                    console.log(`[Status] fal.ai request id=${requestId} run ${run.candidateId} completed (${output.type}, ${latencyMs}ms)`);
-                  }
-                } else {
-                  console.warn(`[Status] Run ${run.candidateId} COMPLETED but no output or error`);
+                } else if (result.output !== undefined) {
+                  // No modelSpec: coerce URL string or { url } to image so UI renders it
+                  const raw = result.output;
+                  const imageOutput: RunOutput =
+                    typeof raw === 'string' && raw.trim().startsWith('http')
+                      ? { type: 'image', images: [{ url: raw.trim() }] }
+                      : typeof raw === 'object' && raw !== null && 'url' in (raw as object)
+                        ? { type: 'image', images: [{ url: String((raw as { url: unknown }).url) }] }
+                        : { type: 'text', text: JSON.stringify(raw) };
+                  await updateRun(iterationId, run.candidateId, {
+                    status: 'done',
+                    outputJson: imageOutput,
+                    latencyMs: Date.now() - run.createdAt.getTime(),
+                  });
                 }
-              } else if (falStatus === 'FAILED') {
-                const result = await falClient.getQueueJobResult(modelId, requestId);
-                const errorMessage = result.error || 'Job failed';
-                await updateRun(iterationId, run.candidateId, {
-                  status: 'error',
-                  error: errorMessage,
-                });
-                console.log(`[Status] fal.ai request id=${requestId} run ${run.candidateId} failed: ${errorMessage}`);
               }
-              // IN_QUEUE and IN_PROGRESS: no logging needed, will be checked again on next poll
             } catch (error) {
               const errorMessage = error instanceof Error ? error.message : String(error);
-              console.error(`[Status] fal.ai request id=${run.falRequestId} error checking run ${run.candidateId}:`, errorMessage);
-              
-              // Check if this is a 422 validation error (invalid parameter values)
-              // These are permanent errors that should be marked in DB
+              console.error(`[Status] request id=${run.falRequestId} error checking run ${run.candidateId}:`, errorMessage);
               if (errorMessage.includes('422') || errorMessage.includes('Unprocessable Entity')) {
-                // Extract error details from the message
                 let detailedError = errorMessage;
                 try {
-                  // Try to extract the JSON error detail from the message
                   const jsonMatch = errorMessage.match(/\{.*\}/);
                   if (jsonMatch) {
-                    const errorDetail = JSON.parse(jsonMatch[0]);
-                    if (errorDetail.detail && Array.isArray(errorDetail.detail)) {
-                      const validationErrors = errorDetail.detail
-                        .map((d: { msg?: string; loc?: string[] }) => {
-                          const param = d.loc?.[d.loc.length - 1] || 'unknown';
-                          return `${param}: ${d.msg || 'validation error'}`;
-                        })
-                        .join('; ');
-                      detailedError = `Validation error: ${validationErrors}`;
+                    const errorDetail = JSON.parse(jsonMatch[0]) as { detail?: Array<{ msg?: string; loc?: string[] }> };
+                    if (errorDetail.detail?.length) {
+                      detailedError = `Validation error: ${errorDetail.detail
+                        .map((d) => `${d.loc?.[d.loc.length - 1] ?? 'unknown'}: ${d.msg ?? 'validation error'}`)
+                        .join('; ')}`;
                     }
                   }
                 } catch {
-                  // If parsing fails, use the original error message
+                  /* use original */
                 }
-                
-                // Mark as error in DB
-                await updateRun(iterationId, run.candidateId, {
-                  status: 'error',
-                  error: detailedError,
-                });
-                console.log(`[Status] fal.ai request id=${run.falRequestId} run ${run.candidateId} marked as error (validation failure)`);
-                return; // Don't re-throw, error is handled
+                await updateRun(iterationId, run.candidateId, { status: 'error', error: detailedError });
+                return;
               }
-              
-              // For other errors, re-throw to be caught by allSettled
               throw error;
             }
           },
-          FAL_AI_CONCURRENCY_LIMIT
+          CONCURRENCY
         );
         
         // Re-fetch runs after updates to get latest status

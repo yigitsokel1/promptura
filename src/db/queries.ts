@@ -75,7 +75,7 @@ export async function findModelEndpointWithSpecOnly(
  */
 export async function findManyModelEndpointsWithSpecs(
   where: {
-    source?: string;
+    source?: string | { in: string[] };
     status?: string | { in: string[] };
   },
   options?: {
@@ -194,46 +194,49 @@ export async function findRunsByModelEndpointId(
   });
 }
 
-// --- Iteration (Blok E: observability). Run: npx prisma migrate dev ---
-export type IterationRecord = { id: string; modelEndpointId: string | null; startedAt: Date; finishedAt: Date | null };
-
-type IterationDelegate = {
-  upsert: (a: { where: { id: string }; create: { id: string; modelEndpointId: string | null }; update: object }) => Promise<IterationRecord>;
-  updateMany: (a: { where: { id: string }; data: { finishedAt: Date } }) => Promise<unknown>;
-  findUnique: (a: { where: { id: string } }) => Promise<IterationRecord | null>;
-  findMany: (a: { orderBy: { startedAt: 'desc' }; take: number }) => Promise<IterationRecord[]>;
+// --- Iteration (Blok E: observability, Blok B: userId for provider key) ---
+export type IterationRecord = {
+  id: string;
+  modelEndpointId: string | null;
+  userId: string | null;
+  startedAt: Date;
+  finishedAt: Date | null;
 };
-
-function getIterationClient(): IterationDelegate | null {
-  const iteration = (prisma as unknown as { iteration?: IterationDelegate }).iteration;
-  return iteration ?? null;
-}
 
 export async function createIterationRecord(data: {
   id: string;
   modelEndpointId?: string;
+  userId?: string;
 }): Promise<void> {
-  const iteration = getIterationClient();
-  if (!iteration) return;
-  await iteration.upsert({
+  await prisma.iteration.upsert({
     where: { id: data.id },
-    create: { id: data.id, modelEndpointId: data.modelEndpointId ?? null },
+    create: {
+      id: data.id,
+      modelEndpointId: data.modelEndpointId ?? null,
+      userId: data.userId ?? null,
+    },
     update: {},
   });
 }
 
 export async function updateIterationFinishedAt(iterationId: string): Promise<void> {
-  const iteration = getIterationClient();
-  if (iteration) await iteration.updateMany({ where: { id: iterationId }, data: { finishedAt: new Date() } });
+  await prisma.iteration.updateMany({
+    where: { id: iterationId },
+    data: { finishedAt: new Date() },
+  });
 }
 
 export async function findIterationById(iterationId: string): Promise<IterationRecord | null> {
-  const iteration = getIterationClient();
-  return iteration ? iteration.findUnique({ where: { id: iterationId } }) : null;
+  const row = await prisma.iteration.findUnique({
+    where: { id: iterationId },
+  });
+  return row as IterationRecord | null;
 }
 
 export async function findIterationsRecent(options?: { take?: number }): Promise<IterationRecord[]> {
-  const iteration = getIterationClient();
-  if (!iteration) return [];
-  return iteration.findMany({ orderBy: { startedAt: 'desc' }, take: options?.take ?? 50 });
+  const rows = await prisma.iteration.findMany({
+    orderBy: { startedAt: 'desc' },
+    take: options?.take ?? 50,
+  });
+  return rows as IterationRecord[];
 }

@@ -2,14 +2,17 @@ import { NextRequest, NextResponse } from 'next/server';
 import { prisma } from '@/src/db/client';
 import { findModelEndpointWithSpec } from '@/src/db/queries';
 import { handleApiError } from '@/src/lib/api-helpers';
+import { requireAdmin, unauthorizedResponse } from '@/src/lib/auth';
 
 /**
- * Get model details by ID
+ * Get model details by ID (ADMIN only)
  */
 export async function GET(
   request: NextRequest,
   { params }: { params: Promise<{ id: string }> }
 ) {
+  const admin = await requireAdmin();
+  if (!admin) return unauthorizedResponse();
   try {
     const { id } = await params;
 
@@ -27,12 +30,14 @@ export async function GET(
 }
 
 /**
- * Update model status
+ * Update model status (ADMIN only)
  */
 export async function PATCH(
   request: NextRequest,
   { params }: { params: Promise<{ id: string }> }
 ) {
+  const admin = await requireAdmin();
+  if (!admin) return unauthorizedResponse();
   try {
     const { id } = await params;
     const body = await request.json();

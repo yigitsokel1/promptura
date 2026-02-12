@@ -4,6 +4,7 @@
  */
 
 import { getProviderAdapter, getPromptGenerationAdapter } from '../index';
+import { ExecutionRunnerAdapter } from '../execution-runner';
 import type { ModelRef } from '@/src/core/types';
 
 describe('modelCatalog / Provider Pairing', () => {
@@ -19,23 +20,26 @@ describe('modelCatalog / Provider Pairing', () => {
   });
 
   describe('getProviderAdapter - valid pairings', () => {
-    it('should return FalAIAdapter for falai provider', () => {
+    it('should return ExecutionRunnerAdapter for falai provider', () => {
       const model: ModelRef = { provider: 'falai', modelId: 'fal-ai/flux/dev' };
-      
-      // Mock environment variable
       const originalKey = process.env.FAL_AI_API_KEY;
       process.env.FAL_AI_API_KEY = 'test-key';
-
       try {
         const adapter = getProviderAdapter(model);
         expect(adapter).toBeDefined();
-        // Should be an instance of FalAIAdapter (or throw if API key missing)
+        expect(adapter).toBeInstanceOf(ExecutionRunnerAdapter);
       } catch (error) {
-        // If API key validation fails, that's expected in test env
         expect(error).toBeDefined();
       } finally {
         process.env.FAL_AI_API_KEY = originalKey;
       }
+    });
+
+    it('should return ExecutionRunnerAdapter for eachlabs provider when apiKey provided', () => {
+      const model: ModelRef = { provider: 'eachlabs', modelId: 'nano-banana-pro-edit' };
+      const adapter = getProviderAdapter(model, { apiKey: 'test-eachlabs-key' });
+      expect(adapter).toBeDefined();
+      expect(adapter).toBeInstanceOf(ExecutionRunnerAdapter);
     });
 
     it('should return GeminiAdapter for google provider', () => {

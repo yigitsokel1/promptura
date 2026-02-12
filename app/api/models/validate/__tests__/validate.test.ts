@@ -1,16 +1,30 @@
 /**
- * Integration tests for fal.ai model validation
+ * Integration tests for model validation (fal.ai and EachLabs)
  */
 
 import { POST } from '../route';
 import { NextRequest } from 'next/server';
 import { createFalAIClientFromEnv, extractModelMetadata } from '@/src/providers/falai/helpers';
+import { findEachLabsModel, eachLabsModality } from '@/src/providers/eachlabs/helpers';
 import { prisma } from '@/src/db/client';
 
 // Mock dependencies
+jest.mock('@/src/lib/auth', () => ({
+  requireAdmin: jest.fn(() =>
+    Promise.resolve({ session: { user: {} }, user: { id: 'admin-id', email: 'admin@test.com', role: 'ADMIN' } })
+  ),
+  unauthorizedResponse: jest.fn(() => new Response(JSON.stringify({ error: 'Unauthorized' }), { status: 401 })),
+}));
 jest.mock('@/src/providers/falai/helpers', () => ({
   createFalAIClientFromEnv: jest.fn(),
   extractModelMetadata: jest.fn(),
+}));
+jest.mock('@/src/providers/eachlabs/helpers', () => ({
+  findEachLabsModel: jest.fn(),
+  eachLabsModality: jest.fn(),
+}));
+jest.mock('@/src/lib/research-helpers', () => ({
+  runResearchJob: jest.fn(() => Promise.resolve()),
 }));
 jest.mock('@/src/db/client', () => ({
   prisma: {
@@ -168,5 +182,79 @@ describe('POST /api/models/validate', () => {
     expect(data.success).toBe(true);
     expect(data.message).toContain('already exists');
     expect(prisma.modelEndpoint.create).not.toHaveBeenCalled();
+  });
+
+  it('should create ModelEndpoint and ResearchJob for valid EachLabs slug', async () => {
+    const mockEachLabsDetail = {
+      title: 'Nano Banana Pro Edit',
+      slug: 'nano-banana-pro-edit',
+      version: '1.0',
+      output_type: 'array',
+    };
+    (findEachLabsModel as jest.Mock).mockResolvedValue(mockEachLabsDetail);
+    (eachLabsModality as jest.Mock).mockReturnValue('image');
+
+    (prisma.modelEndpoint.findFirst as jest.Mock).mockResolvedValue(null);
+    const mockModelEndpoint = {
+      id: 'model-id-el',
+      endpointId: 'nano-banana-pro-edit',
+      kind: 'model',
+      modality: 'image',
+      status: 'pending_research',
+      source: 'eachlabs',
+      provider: 'eachlabs',
+      createdAt: new Date(),
+      lastCheckedAt: new Date(),
+    };
+    const mockResearchJob = {
+      id: 'job-id-el',
+      modelEndpointId: 'model-id-el',
+      status: 'queued',
+      startedAt: new Date(),
+    };
+    (prisma.modelEndpoint.create as jest.Mock).mockResolvedValue(mockModelEndpoint);
+    (prisma.researchJob.create as jest.Mock).mockResolvedValue(mockResearchJob);
+
+    const request = new NextRequest('http://localhost/api/models/validate', {
+      method: 'POST',
+      body: JSON.stringify({ endpointId: 'nano-banana-pro-edit', source: 'eachlabs' }),
+    });
+
+    const response = await POST(request);
+    const data = await response.json();
+
+    expect(response.status).toBe(200);
+    expect(data.success).toBe(true);
+    expect(findEachLabsModel).toHaveBeenCalledWith('nano-banana-pro-edit');
+    expect(eachLabsModality).toHaveBeenCalledWith(mockEachLabsDetail);
+    expect(prisma.modelEndpoint.create).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          endpointId: 'nano-banana-pro-edit',
+          kind: 'model',
+          modality: 'image',
+          source: 'eachlabs',
+          provider: 'eachlabs',
+          status: 'pending_research',
+        }),
+      })
+    );
+    expect(prisma.researchJob.create).toHaveBeenCalled();
+  });
+
+  it('should return 404 for EachLabs slug not found', async () => {
+    (findEachLabsModel as jest.Mock).mockResolvedValue(null);
+    (prisma.modelEndpoint.findFirst as jest.Mock).mockResolvedValue(null);
+
+    const request = new NextRequest('http://localhost/api/models/validate', {
+      method: 'POST',
+      body: JSON.stringify({ endpointId: 'nonexistent-slug', source: 'eachlabs' }),
+    });
+
+    const response = await POST(request);
+    const data = await response.json();
+
+    expect(response.status).toBe(404);
+    expect(data.error).toContain('Model not found in EachLabs');
   });
 });

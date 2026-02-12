@@ -1,13 +1,19 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { prisma } from '@/src/db/client';
 import { createFalAIClientFromEnv } from '@/src/providers/falai/helpers';
+import {
+  findEachLabsModel,
+  eachLabsDetailToFalMetadata,
+} from '@/src/providers/eachlabs/helpers';
 import { researchModelWithGemini } from '@/src/providers/gemini/helpers';
+import type { FalAIModelMetadata } from '@/src/providers/falai/types';
 import { Prisma } from '@prisma/client';
 import { handleApiError } from '@/src/lib/api-helpers';
 import { updateResearchJobError } from '@/src/lib/research-helpers';
+import { requireAdmin, unauthorizedResponse } from '@/src/lib/auth';
 
 /**
- * Refresh research for a model
+ * Refresh research for a model (ADMIN only)
  * 
  * Flow:
  * 1. Create new ResearchJob (queued)
@@ -20,6 +26,8 @@ export async function POST(
   request: NextRequest,
   { params }: { params: Promise<{ id: string }> }
 ) {
+  const admin = await requireAdmin();
+  if (!admin) return unauthorizedResponse();
   try {
     const { id } = await params;
 
@@ -51,14 +59,24 @@ export async function POST(
     });
 
     try {
-      // Fetch model metadata from fal.ai
-      const falClient = createFalAIClientFromEnv();
-      const modelMetadata = await falClient.findModel(modelEndpoint.endpointId);
-
-      if (!modelMetadata) {
-        throw new Error(
-          `Model not found in fal.ai: ${modelEndpoint.endpointId}`
-        );
+      let modelMetadata: FalAIModelMetadata;
+      if (modelEndpoint.source === 'eachlabs') {
+        const detail = await findEachLabsModel(modelEndpoint.endpointId);
+        if (!detail) {
+          throw new Error(
+            `Model not found in EachLabs: ${modelEndpoint.endpointId}`
+          );
+        }
+        modelMetadata = eachLabsDetailToFalMetadata(detail);
+      } else {
+        const falClient = createFalAIClientFromEnv();
+        const falMetadata = await falClient.findModel(modelEndpoint.endpointId);
+        if (!falMetadata) {
+          throw new Error(
+            `Model not found in fal.ai: ${modelEndpoint.endpointId}`
+          );
+        }
+        modelMetadata = falMetadata;
       }
 
       // Research model with Gemini
