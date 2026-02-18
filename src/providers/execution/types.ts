@@ -3,7 +3,7 @@
  * All execution backends (fal.ai, eachlabs) implement this interface.
  */
 
-import type { CandidatePrompt, RunOutput } from '@/src/core/types';
+import type { CandidatePrompt, OutputAsset, TaskAsset } from '@/src/core/types';
 import type { ModelSpec } from '@/src/core/modelSpec';
 
 export type ExecutionJobStatus = 'queued' | 'running' | 'completed' | 'failed';
@@ -13,11 +13,18 @@ export interface ExecutionResult {
   error?: string;
 }
 
-/** Optional task inputs (image, video, text) for payload building */
+/** Task assets for payload building (image-to-image, etc.) */
 export interface TaskInputs {
   image?: string;
   video?: string;
   text?: string;
+  /** New modality-agnostic format; preferred when present */
+  assets?: TaskAsset[];
+  /**
+   * Optional upload cache: base64/data URL -> fal.ai URL.
+   * Avoids re-uploading the same image/video per candidate (was causing timeouts).
+   */
+  _uploadCache?: Map<string, string>;
 }
 
 /**
@@ -53,9 +60,9 @@ export interface ExecutionProvider {
   ): Promise<ExecutionResult & { status: ExecutionJobStatus }>;
 
   /**
-   * Convert provider-specific raw output to RunOutput using ModelSpec.
+   * Convert provider-specific raw output to OutputAsset[] using ModelSpec.
    */
-  convertToRunOutput(rawOutput: unknown, modelSpec: ModelSpec): RunOutput;
+  convertToOutputAssets(rawOutput: unknown, modelSpec: ModelSpec): OutputAsset[];
 }
 
 export type ExecutionProviderSlug = 'falai' | 'eachlabs';

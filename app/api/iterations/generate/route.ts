@@ -1,14 +1,22 @@
 import { NextRequest, NextResponse } from 'next/server';
+import { after } from 'next/server';
 import type { TaskSpec, ModelRef } from '@/src/core/types';
 import type { ModelSpec } from '@/src/core/modelSpec';
-import { createIteration, addCandidates } from '@/src/core/iteration/iteration';
+import { modelSpecNeedsImage, modelSpecNeedsVideo } from '@/src/core/modelSpec';
 import { generateIterationId } from '@/src/core/iteration/id-generator';
 import { getProviderAdapter, getPromptGenerationAdapter } from '@/src/providers';
-import { findModelEndpointWithSpecOnly, createIterationRecord } from '@/src/db/queries';
+import {
+  findModelEndpointWithSpecOnly,
+  createIterationRecord,
+  updateIterationWithCandidates,
+  updateIterationError,
+} from '@/src/db/queries';
 import { handleApiError } from '@/src/lib/api-helpers';
 import { requireAuth, unauthorizedResponse } from '@/src/lib/auth';
 import { requireUserProviderKey, type ProviderSlug } from '@/src/lib/provider-keys';
 import { checkRateLimit, getRateLimitMax, getRateLimitWindowMs } from '@/src/lib/rate-limit';
+import { supportsModality } from '@/src/lib/provider-capabilities';
+import type { ExecutionProviderSlug } from '@/src/providers/execution';
 
 interface GenerateRequest {
   task: TaskSpec;
@@ -36,7 +44,40 @@ export async function POST(request: NextRequest) {
   }
 
   try {
-    const body: GenerateRequest = await request.json();
+    let body: GenerateRequest;
+    const contentType = request.headers.get('content-type') ?? '';
+
+    if (contentType.includes('multipart/form-data')) {
+      // FormData: image sent as file to avoid JSON body size limit
+      const formData = await request.formData();
+      const taskJson = formData.get('task');
+      const modelEndpointIdRaw = formData.get('modelEndpointId');
+      const imageFile = formData.get('image') as File | null;
+
+      if (!taskJson || typeof taskJson !== 'string' || !modelEndpointIdRaw || typeof modelEndpointIdRaw !== 'string') {
+        return NextResponse.json(
+          { error: 'Missing required fields: task, modelEndpointId' },
+          { status: 400 }
+        );
+      }
+
+      const taskFromJson = JSON.parse(taskJson) as TaskSpec;
+      const assets: TaskSpec['assets'] = [...(taskFromJson.assets ?? [])];
+
+      if (imageFile && imageFile.size > 0) {
+        const buf = await imageFile.arrayBuffer();
+        const base64 = Buffer.from(buf).toString('base64');
+        const mime = imageFile.type || 'image/jpeg';
+        assets.push({ type: 'image', url: `data:${mime};base64,${base64}` });
+      }
+
+      body = {
+        task: { ...taskFromJson, assets: assets.length > 0 ? assets : undefined },
+        modelEndpointId: modelEndpointIdRaw.trim(),
+      };
+    } else {
+      body = await request.json();
+    }
 
     if (!body.task || !body.modelEndpointId) {
       return NextResponse.json(
@@ -88,6 +129,22 @@ export async function POST(request: NextRequest) {
       modelId: modelEndpoint.endpointId,
     };
 
+    // Blok E: Provider capability check — model modality must match provider supports
+    if (targetModel.provider === 'falai' || targetModel.provider === 'eachlabs') {
+      const providerSlug = targetModel.provider as ExecutionProviderSlug;
+      if (!supportsModality(providerSlug, task.modality)) {
+        return NextResponse.json(
+          {
+            error: `Provider ${targetModel.provider} does not support modality "${task.modality}".`,
+            code: 'ModalityNotSupported',
+            provider: targetModel.provider,
+            modality: task.modality,
+          },
+          { status: 400 }
+        );
+      }
+    }
+
     // Blok B: user provider key (required for falai/eachlabs; Gemini stays system)
     let userApiKey: string | undefined;
     if (targetModel.provider === 'falai' || targetModel.provider === 'eachlabs') {
@@ -112,6 +169,27 @@ export async function POST(request: NextRequest) {
     }
     const modelSpec = latestSpec.specJson as ModelSpec;
 
+    // Sprint 7: fail fast when required asset is missing (return 400, not background error)
+    const taskAssets = task.assets ?? [];
+    if (modelSpecNeedsImage(modelSpec)) {
+      const hasImage = taskAssets.some((a) => a.type === 'image');
+      if (!hasImage) {
+        return NextResponse.json(
+          { error: 'Image required.', code: 'AssetRequired', required: 'image' },
+          { status: 400 }
+        );
+      }
+    }
+    if (modelSpecNeedsVideo(modelSpec)) {
+      const hasVideo = taskAssets.some((a) => a.type === 'video');
+      if (!hasVideo) {
+        return NextResponse.json(
+          { error: 'Video required.', code: 'AssetRequired', required: 'video' },
+          { status: 400 }
+        );
+      }
+    }
+
     // Always use Gemini for prompt generation (Sprint 3)
     const promptAdapter = getPromptGenerationAdapter();
     const runnerAdapter = getProviderAdapter(targetModel, { apiKey: userApiKey });
@@ -119,65 +197,70 @@ export async function POST(request: NextRequest) {
     // Generate iteration ID
     const iterationId = generateIterationId();
 
-    // Create base iteration (Blok B: store userId for status polling)
-    let iteration = createIteration(iterationId, task, targetModel);
+    // Candidate count
+    let candidateCount = 20;
+    if (process.env.TEST_CANDIDATE_COUNT) {
+      candidateCount = parseInt(process.env.TEST_CANDIDATE_COUNT, 10);
+      if (isNaN(candidateCount) || candidateCount < 1) candidateCount = 20;
+    } else if (process.env.TEST_MODE === 'true') {
+      candidateCount = 5;
+    }
+
+    // Create iteration record with task; return 202 immediately so client timeout cannot kill Gemini
     await createIterationRecord({
       id: iterationId,
       modelEndpointId,
       userId: session.user.id,
+      taskJson: { goal: task.goal, modality: task.modality, assets: task.assets },
     }).catch((err) =>
-      console.warn('[Generate] Iteration record create failed (observability):', err)
+      console.warn('[Generate] Iteration record create failed:', err)
     );
 
-    // Generate candidate prompts using Gemini with ModelSpec
-    // Priority: TEST_CANDIDATE_COUNT > TEST_MODE > default (20)
-    // If TEST_CANDIDATE_COUNT is set, use it regardless of TEST_MODE
-    let candidateCount = 20; // default
-    if (process.env.TEST_CANDIDATE_COUNT) {
-      candidateCount = parseInt(process.env.TEST_CANDIDATE_COUNT, 10);
-      if (isNaN(candidateCount) || candidateCount < 1) {
-        console.warn(`Invalid TEST_CANDIDATE_COUNT: ${process.env.TEST_CANDIDATE_COUNT}, using default 20`);
-        candidateCount = 20;
-      }
-    } else if (process.env.TEST_MODE === 'true') {
-      candidateCount = 5; // TEST_MODE default
-    }
-    
-    console.log(`[Generate] Using candidate count: ${candidateCount} (TEST_CANDIDATE_COUNT=${process.env.TEST_CANDIDATE_COUNT}, TEST_MODE=${process.env.TEST_MODE})`);
-    
-    const promptResult = await promptAdapter.generateCandidates(
-      task,
-      targetModel,
-      candidateCount,
-      {
-        goal: task.goal,
-        modelSpec,
-      }
-    );
-    console.log(`[Generate] Gemini returned ${promptResult.candidates.length} candidates`);
+    // Run Gemini + fal.ai in background; client polls status and gets candidates when ready
+    after(async () => {
+      try {
+        console.log(`[Generate] Background: using candidate count ${candidateCount}`);
+        const t0 = Date.now();
+        const promptResult = await promptAdapter.generateCandidates(task, targetModel, candidateCount, {
+          goal: task.goal,
+          modelSpec,
+        });
+        console.log(`[Generate] Background: Gemini returned ${promptResult.candidates.length} in ${((Date.now() - t0) / 1000).toFixed(1)}s`);
 
-    // Add candidates to iteration
-    iteration = addCandidates(iteration, promptResult.candidates);
+        await updateIterationWithCandidates(
+          iterationId,
+          promptResult.candidates.map((c) => ({
+            id: c.id,
+            prompt: c.prompt,
+            generator: c.generator,
+          }))
+        );
 
-    // Submit jobs to queue (submitOnly mode - UI will poll for results)
-    await runnerAdapter.runCandidates(
-      task,
-      targetModel,
-      promptResult.candidates,
-      {
-        modelSpec,
-        iterationId,
-        modelEndpointId: modelEndpoint.id,
-        submitOnly: true, // Don't block on polling - UI will poll
+        await runnerAdapter.runCandidates(task, targetModel, promptResult.candidates, {
+          modelSpec,
+          iterationId,
+          modelEndpointId: modelEndpoint.id,
+          submitOnly: true,
+        });
+        console.log(`[Generate] Background: jobs submitted for ${iterationId}`);
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        console.error(`[Generate] Background failed for ${iterationId}:`, msg);
+        await updateIterationError(iterationId, msg).catch(() => {});
       }
-    );
-    console.log(`[Generate] Jobs submitted for iteration ${iterationId}`);
-
-    // Return iteration with pending status (UI will poll /api/iterations/[id]/status)
-    return NextResponse.json({
-      ...iteration,
-      status: 'pending', // Indicates jobs are submitted, results pending
     });
+
+    return NextResponse.json(
+      {
+        id: iterationId,
+        task,
+        targetModel,
+        candidates: [],
+        results: [],
+        status: 'generating',
+      },
+      { status: 202 }
+    );
   } catch (error) {
     return handleApiError(error, '/api/iterations/generate');
   }

@@ -11,7 +11,8 @@ import type {
   RunCandidatesResult,
 } from '../types';
 import type { TaskSpec, ModelRef, CandidatePrompt } from '@/src/core/types';
-import type { ModelSpec } from '@/src/core/modelSpec';
+import type { ModelSpec, ResearchGuidelinesResult } from '@/src/core/modelSpec';
+import { modelSpecNeedsImage, modelSpecNeedsVideo } from '@/src/core/modelSpec';
 import type { FalAIModelMetadata } from '../falai/types';
 import {
   generatePrompts,
@@ -55,27 +56,7 @@ export class GeminiAdapter implements ProviderAdapter {
       ? refinePrompts(task, modelSpec, context.selectedPrompts!, count)
       : generatePrompts(task, modelSpec, count);
 
-    // Contract v2 schema: prompts[].{ prompt, reasoning, tags, params?, inputAssets? }
-    const paramsProperties: Record<string, { type: string; description?: string; enum?: string[] }> = {};
-    modelSpec.inputs.forEach((input) => {
-      if (
-        input.name.toLowerCase() === 'prompt' ||
-        input.type.toLowerCase() === 'image' ||
-        input.type.toLowerCase() === 'video'
-      ) {
-        return;
-      }
-      let schemaType = 'string';
-      if (input.type === 'number') schemaType = 'number';
-      else if (input.type === 'boolean') schemaType = 'boolean';
-      const prop: { type: string; description?: string; enum?: string[] } = {
-        type: schemaType,
-        description: input.description || `${input.name} parameter`,
-      };
-      if (schemaType === 'string' && input.enum?.length) prop.enum = input.enum;
-      paramsProperties[input.name] = prop;
-    });
-
+    // Contract v2 schema: prompts[].{ prompt, reasoning, tags, inputAssets? } — no params; we use spec defaults
     const itemProperties: Record<string, unknown> = {
       prompt: { type: 'string', description: 'Main prompt text in English' },
       reasoning: { type: 'string', description: 'Why this prompt is effective' },
@@ -85,15 +66,8 @@ export class GeminiAdapter implements ProviderAdapter {
         description: 'Tags e.g. style, motion, lighting',
       },
     };
-    if (Object.keys(paramsProperties).length > 0) {
-      itemProperties.params = {
-        type: 'object',
-        description: 'Model-specific parameters',
-        properties: paramsProperties,
-      };
-    }
-    const hasImageInput = modelSpec.inputs.some((inp) => inp.type.toLowerCase() === 'image');
-    const hasVideoInput = modelSpec.inputs.some((inp) => inp.type.toLowerCase() === 'video');
+    const hasImageInput = modelSpecNeedsImage(modelSpec);
+    const hasVideoInput = modelSpecNeedsVideo(modelSpec);
     if (hasImageInput || hasVideoInput) {
       const inputAssetsProperties: Record<string, { type: string }> = {};
       if (hasImageInput) inputAssetsProperties.image = { type: 'string' };
@@ -119,7 +93,8 @@ export class GeminiAdapter implements ProviderAdapter {
       required: ['prompts'],
     };
 
-    const url = `${this.baseUrl}/v1beta/models/gemini-3-flash-preview:generateContent?key=${this.apiKey}`;
+    const model = process.env.GEMINI_MODEL || 'gemini-2.0-flash';
+    const url = `${this.baseUrl}/v1beta/models/${model}:generateContent?key=${this.apiKey}`;
     const requestBody = {
       contents: [{ parts: [{ text: promptText }] }],
       generationConfig: {
@@ -178,7 +153,6 @@ export class GeminiAdapter implements ProviderAdapter {
       const candidates: CandidatePrompt[] = result.prompts.slice(0, count).map((item, index) => ({
         id: `gemini_candidate_${Date.now()}_${index}`,
         prompt: item.prompt,
-        params: item.params ? (item.params as CandidatePrompt['params']) : undefined,
         inputAssets: item.inputAssets ? (item.inputAssets as CandidatePrompt['inputAssets']) : undefined,
         generator: 'gemini-fallback',
         reasoning: item.reasoning,
@@ -222,31 +196,20 @@ export class GeminiAdapter implements ProviderAdapter {
   }
 
   /**
-   * Research and analyze a model to generate ModelSpec
-   * This is the core research functionality that uses Gemini to understand a model
+   * Research prompt guidelines only (Sprint 7 — no params, no modality/required_assets).
+   * Modality and required_assets come from schema or endpoint; Gemini never guesses them.
    */
   async researchModel(
     modelMetadata: FalAIModelMetadata,
     kind: 'model' | 'workflow',
     modality: string
-  ): Promise<ModelSpec> {
-    // Build the prompt for Gemini
+  ): Promise<ResearchGuidelinesResult> {
     const prompt = this.buildResearchPrompt(modelMetadata, kind, modality);
 
-    // Call Gemini API with JSON response mode
-    // Using Gemini 3 Flash Preview - latest model (December 2025)
     const url = `${this.baseUrl}/v1beta/models/gemini-3-flash-preview:generateContent?key=${this.apiKey}`;
 
     const requestBody = {
-      contents: [
-        {
-          parts: [
-            {
-              text: prompt,
-            },
-          ],
-        },
-      ],
+      contents: [{ parts: [{ text: prompt }] }],
       generationConfig: {
         temperature: 0.3,
         responseMimeType: 'application/json',
@@ -260,9 +223,7 @@ export class GeminiAdapter implements ProviderAdapter {
 
       const response = await fetch(url, {
         method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-        },
+        headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(requestBody),
         signal: controller.signal,
       });
@@ -271,48 +232,36 @@ export class GeminiAdapter implements ProviderAdapter {
 
       if (!response.ok) {
         const errorText = await response.text();
-        throw new Error(
-          `Gemini API error: ${response.status} ${response.statusText} - ${errorText}`
-        );
+        throw new Error(`Gemini API error: ${response.status} ${response.statusText} - ${errorText}`);
       }
 
       const data = await response.json();
 
-      // Extract JSON from response
-      // When responseMimeType is 'application/json', the response structure may vary
-      let spec: ModelSpec;
-      
+      let result: ResearchGuidelinesResult;
+
       if (data.candidates?.[0]?.content?.parts?.[0]?.text) {
-        // Text response (might be wrapped in code blocks)
         let jsonText = data.candidates[0].content.parts[0].text.trim();
-        
-        // Remove code blocks if present
         if (jsonText.startsWith('```json')) {
           jsonText = jsonText.replace(/^```json\s*/, '').replace(/\s*```$/, '');
         } else if (jsonText.startsWith('```')) {
           jsonText = jsonText.replace(/^```\s*/, '').replace(/\s*```$/, '');
         }
-        
-        spec = JSON.parse(jsonText);
+        result = JSON.parse(jsonText);
       } else if (data.candidates?.[0]?.content?.parts?.[0]?.json) {
-        // Direct JSON response (when using responseMimeType)
-        spec = data.candidates[0].content.parts[0].json as ModelSpec;
+        result = data.candidates[0].content.parts[0].json as ResearchGuidelinesResult;
       } else {
-        // Fallback: try to parse the entire response or look for text in parts
         const textPart = data.candidates?.[0]?.content?.parts?.find(
           (part: { text?: string }) => part.text
         );
         if (textPart?.text) {
-          spec = JSON.parse(textPart.text);
+          result = JSON.parse(textPart.text);
         } else {
           throw new Error('No JSON response from Gemini');
         }
       }
 
-      // Validate the spec structure
-      this.validateModelSpec(spec);
-
-      return spec;
+      this.validateResearchGuidelines(result);
+      return result;
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       const cause = error instanceof Error && error.cause instanceof Error ? error.cause.message : undefined;
@@ -326,7 +275,7 @@ export class GeminiAdapter implements ProviderAdapter {
   }
 
   /**
-   * Build the research prompt for Gemini
+   * Build the research prompt — guidelines only. We already have modality from schema/API.
    */
   private buildResearchPrompt(
     modelMetadata: FalAIModelMetadata,
@@ -336,77 +285,40 @@ export class GeminiAdapter implements ProviderAdapter {
     const metadata = modelMetadata.metadata;
     const endpointId = modelMetadata.endpoint_id;
 
-    return `You are an AI model researcher. Analyze the following fal.ai model endpoint and generate a comprehensive JSON specification.
+    return `You are an AI model researcher. Your job is ONLY to write prompt guidelines and an optional summary. Do NOT guess modality, required_assets, or any API parameters — we get those from the API/schema.
 
-Model Information:
+Model information (for context only):
 - Endpoint ID: ${endpointId}
 - Kind: ${kind}
-- Modality: ${modality}
+- Modality (we already know this): ${modality}
 - Display Name: ${metadata.display_name || 'N/A'}
 - Category: ${metadata.category || 'N/A'}
 - Description: ${metadata.description || 'N/A'}
-- Status: ${metadata.status || 'N/A'}
-- Tags: ${metadata.tags?.join(', ') || 'N/A'}
 
 Your task:
-1. Analyze the model's capabilities based on the metadata
-2. Determine the input parameters (name, type, required, min/max if applicable)
-3. Determine the output format (type, format)
-4. Provide recommended parameter ranges if applicable
-5. Generate prompt writing guidelines based on the model's purpose
-6. If this is a workflow, identify the workflow steps
+1. Write prompt_guidelines: 3–8 actionable tips for how to write effective prompts for this model and for this modality (e.g. for text-to-image: style, composition, lighting; for image-to-video: motion, timing).
+2. Optionally write summary: one or two sentences on how this model works or what it is best at.
 
 Return ONLY a valid JSON object with this exact structure:
 {
-  "inputs": [
-    { "name": "param_name", "type": "string|number|boolean|image", "required": true/false, "min": number (optional), "max": number (optional), "description": "string (optional)", "enum": ["value1", "value2"] (optional - ONLY for string params with a fixed set of allowed values, e.g. image_size) }
-  ],
-  "outputs": {
-    "type": "text|image|video|audio",
-    "format": "string|url|url[]|base64",
-    "description": "string (optional)"
-  },
-  "recommended_ranges": {
-    "param_name": [min, max]
-  },
-  "prompt_guidelines": [
-    "guideline 1",
-    "guideline 2"
-  ],
-  "workflow_steps": [
-    { "step": 1, "description": "...", "inputs": ["..."], "outputs": ["..."] }
-  ],
-  "summary": "Brief explanation of how this model works"
+  "prompt_guidelines": ["guideline 1", "guideline 2", "..."],
+  "summary": "Optional brief explanation"
 }
 
 Important:
-- Be specific and accurate based on the model metadata
-- For image models, typically have "prompt" (string, required) and "steps" (number, 1-50)
-- For string parameters that accept only specific values (e.g. image_size, aspect_ratio), include an "enum" array with the exact allowed values from the API (e.g. "enum": ["square_hd", "square", "portrait_4_3", "landscape_4_3"])
-- For text models, typically have "prompt" (string, required)
-- Output format should match the modality (image models output "image" type with "url[]" format)
-- Prompt guidelines should be actionable and specific to this model
-- If workflow_steps is not applicable, use an empty array
-- recommended_ranges is optional but helpful for numeric parameters
+- Do NOT include modality, required_assets, inputs, outputs, or any parameter definitions.
+- Focus only on how to write good prompts for this modality and model.
 
 Return ONLY the JSON, no markdown, no code blocks, no explanations.`;
   }
 
-  /**
-   * Validate the ModelSpec structure
-   */
-  private validateModelSpec(spec: ModelSpec): void {
-    if (!spec.inputs || !Array.isArray(spec.inputs)) {
-      throw new Error('ModelSpec must have inputs array');
+  /** Validate research result (guidelines only). */
+  private validateResearchGuidelines(result: ResearchGuidelinesResult): void {
+    if (!result.prompt_guidelines || !Array.isArray(result.prompt_guidelines)) {
+      throw new Error('Research result must have prompt_guidelines array');
     }
-    if (!spec.outputs || typeof spec.outputs !== 'object') {
-      throw new Error('ModelSpec must have outputs object');
-    }
-    if (!spec.prompt_guidelines || !Array.isArray(spec.prompt_guidelines)) {
-      throw new Error('ModelSpec must have prompt_guidelines array');
-    }
-    if (spec.inputs.length === 0) {
-      throw new Error('ModelSpec must have at least one input');
+    if (result.prompt_guidelines.length === 0) {
+      throw new Error('prompt_guidelines must have at least one item');
     }
   }
 }

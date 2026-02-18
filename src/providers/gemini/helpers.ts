@@ -5,29 +5,28 @@
 
 import { createGeminiAdapter } from './index';
 import type { FalAIModelMetadata } from '../falai/types';
-import type { ModelSpec } from '@/src/core/modelSpec';
+import type { ResearchGuidelinesResult } from '@/src/core/modelSpec';
 
 /**
- * Research a model using Gemini adapter
- * Handles type assertion internally
+ * Research prompt guidelines only (Sprint 7).
+ * Returns prompt_guidelines + optional summary. Modality/required_assets come from schema or endpoint.
  */
 export async function researchModelWithGemini(
   modelMetadata: FalAIModelMetadata,
   kind: 'model' | 'workflow',
   modality: string
-): Promise<ModelSpec> {
+): Promise<ResearchGuidelinesResult> {
   const geminiAdapter = createGeminiAdapter();
-  
-  // Type assertion needed because researchModel is not in ProviderAdapter interface
-  const modelSpec = await (
+
+  const result = await (
     geminiAdapter as unknown as {
       researchModel: (
         metadata: FalAIModelMetadata,
         kind: 'model' | 'workflow',
         modality: string
-      ) => Promise<ModelSpec>;
+      ) => Promise<ResearchGuidelinesResult>;
     }
   ).researchModel(modelMetadata, kind, modality);
 
-  return modelSpec;
+  return result;
 }

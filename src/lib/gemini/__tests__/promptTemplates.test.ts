@@ -13,8 +13,8 @@ import type { TaskSpec } from '@/src/core/types';
 import type { ModelSpec } from '@/src/core/modelSpec';
 
 const minimalModelSpec: ModelSpec = {
-  inputs: [{ name: 'prompt', type: 'string', required: true }],
-  outputs: { type: 'image', format: 'url[]' },
+  modality: 'text-to-image',
+  required_assets: 'none',
   prompt_guidelines: ['Use clear descriptions', 'Prefer present tense'],
 };
 

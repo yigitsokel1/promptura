@@ -13,7 +13,7 @@ describe('executionProviderFactory', () => {
     expect(provider.getStatus).toBeDefined();
     expect(provider.getResult).toBeDefined();
     expect(provider.buildPayload).toBeDefined();
-    expect(provider.convertToRunOutput).toBeDefined();
+    expect(provider.convertToOutputAssets).toBeDefined();
   });
 
   it('returns EachLabsExecutionProvider for eachlabs', () => {
@@ -23,7 +23,7 @@ describe('executionProviderFactory', () => {
     expect(provider.getStatus).toBeDefined();
     expect(provider.getResult).toBeDefined();
     expect(provider.buildPayload).toBeDefined();
-    expect(provider.convertToRunOutput).toBeDefined();
+    expect(provider.convertToOutputAssets).toBeDefined();
   });
 
   it('throws for unknown provider', () => {

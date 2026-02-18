@@ -3,19 +3,25 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
 import Image from 'next/image';
 import Link from 'next/link';
-import type { TaskSpec, Modality, Iteration, RunOutput, FeedbackItem } from '@/src/core/types';
+import type { TaskSpec, Modality, Iteration, OutputAsset, FeedbackItem } from '@/src/core/types';
 import type { ModelEndpointWithRelations } from '@/src/db/types';
 import { shouldApplyStatusUpdate } from '@/src/lib/iterationPolling';
+import { compressImageToDataUrl } from '@/src/lib/image-compress';
+import { OutputPreview } from '@/app/components/OutputPreview';
 
 interface IterationStatus {
   iterationId: string;
+  status?: 'generating' | 'pending' | 'error';
+  task?: { goal: string; modality: string; assets?: unknown[] };
+  candidates?: Array<{ id: string; prompt: string }>;
+  error?: string;
   runs: Array<{
     candidateId: string;
     status: 'queued' | 'running' | 'done' | 'error';
-    output?: RunOutput;
+    assets?: OutputAsset[];
     latencyMs?: number;
     error?: string;
-    queuePosition?: number; // Position in fal.ai queue (if IN_QUEUE)
+    queuePosition?: number;
   }>;
   allDone: boolean;
   hasErrors: boolean;
@@ -40,95 +46,46 @@ export default function Playground() {
   const [lightboxImageUrl, setLightboxImageUrl] = useState<string | null>(null);
   /** At least one provider (fal.ai or EachLabs) has an API key configured. null = still loading. */
   const [hasProviderKey, setHasProviderKey] = useState<boolean | null>(null);
+  /** Task input assets for image-to-image, image-to-video, etc. (data URL or URL) */
+  const [taskImageUrl, setTaskImageUrl] = useState<string>('');
+  const [taskVideoUrl, setTaskVideoUrl] = useState<string>('');
   const modelsRef = useRef<ModelEndpointWithRelations[]>([]);
   const isInitialLoadRef = useRef(true);
   /** Tracks the iteration we're showing and polling for. Prevents late poll responses from overwriting a newer iteration. */
   const activeIterationIdRef = useRef<string | null>(null);
 
-  // Helper function to map DB modality to TaskSpec Modality
+  // Helper function to map DB modality to TaskSpec Modality (param-free spec: use spec.modality)
   const mapModalityFromModel = (model: ModelEndpointWithRelations): Modality => {
-    // If model has a spec, try to determine from inputs and outputs
     if (model.modelSpecs && model.modelSpecs.length > 0) {
-      const spec = model.modelSpecs[0].specJson as { 
-        outputs?: { type?: string };
-        inputs?: Array<{ type?: string; name?: string }>;
-      };
-      
-      if (spec?.outputs?.type) {
-        const outputType = spec.outputs.type.toLowerCase();
-        const inputs = spec.inputs || [];
-        
-        // Check if input is image/video by TYPE first (most reliable)
-        // Only check name if type is not explicitly set
-        // IMPORTANT: Exclude parameter names like "num_images", "aspect_ratio", etc.
-        const hasImageInput = inputs.some((inp) => {
-          const type = inp.type?.toLowerCase() || '';
-          // Type check is primary - if type is 'image', it's definitely image input
-          if (type === 'image') return true;
-          // Name check is secondary - only if type is not set or ambiguous
-          if (!type || type === 'string') {
-            const name = inp.name?.toLowerCase() || '';
-            // Common image input names (but exclude parameters like "num_images", "aspect_ratio")
-            return (name === 'image' ||
-                   name === 'input_image' ||
-                   name === 'source_image' ||
-                   name === 'img' ||
-                   name === 'image_url' ||
-                   name === 'image_file') &&
-                   !name.includes('num_') &&
-                   !name.includes('aspect_');
-          }
-          return false;
-        });
-        
-        const hasVideoInput = inputs.some((inp) => {
-          const type = inp.type?.toLowerCase() || '';
-          if (type === 'video') return true;
-          if (!type || type === 'string') {
-            const name = inp.name?.toLowerCase() || '';
-            return name === 'video' || 
-                   name === 'input_video' || 
-                   name === 'source_video' ||
-                   name === 'video_url' ||
-                   name === 'video_file';
-          }
-          return false;
-        });
-        
-        if (outputType === 'image') {
-          return hasImageInput ? 'image-to-image' : 'text-to-image';
-        }
-        
-        if (outputType === 'video') {
-          if (hasVideoInput) return 'video-to-video';
-          if (hasImageInput) return 'image-to-video';
-          return 'text-to-video';
-        }
-        
-        if (outputType === 'text') {
-          return 'text-to-text';
-        }
-      }
+      const spec = model.modelSpecs[0].specJson as { modality?: Modality } | undefined;
+      if (spec?.modality) return spec.modality;
     }
-    
-    // Fallback: DB modality field only tells us output type, not input
-    // We can't determine input type from DB alone, so we default to text-to-X
-    // But this is not ideal - ModelSpec should always be available for active models
-    const dbModality = model.modality.toLowerCase();
+    const dbModality = model.modality?.toLowerCase();
     if (dbModality === 'image') {
-      // For image output, we can't know if it's text-to-image or image-to-image
-      // Default to text-to-image, but this should be fixed by having ModelSpec
-      console.warn(`Model ${model.endpointId} has no ModelSpec, defaulting to text-to-image. Please ensure ModelSpec is available.`);
+      console.warn(`Model ${model.endpointId} has no ModelSpec, defaulting to text-to-image.`);
       return 'text-to-image';
     }
     if (dbModality === 'video') {
-      console.warn(`Model ${model.endpointId} has no ModelSpec, defaulting to text-to-video. Please ensure ModelSpec is available.`);
+      console.warn(`Model ${model.endpointId} has no ModelSpec, defaulting to text-to-video.`);
       return 'text-to-video';
     }
     return 'text-to-text';
   };
 
-  // Update modality when model is selected (always use mapModalityFromModel; it falls back to DB modality when no spec)
+  /** Check if ModelSpec requires image input (param-free: required_assets) */
+  const requiresImageInput = (model: ModelEndpointWithRelations): boolean => {
+    const spec = model.modelSpecs?.[0]?.specJson as { required_assets?: string } | undefined;
+    const r = spec?.required_assets ?? 'none';
+    return r === 'image' || r === 'image+video';
+  };
+
+  /** Check if ModelSpec requires video input (param-free: required_assets) */
+  const requiresVideoInput = (model: ModelEndpointWithRelations): boolean => {
+    const spec = model.modelSpecs?.[0]?.specJson as { required_assets?: string } | undefined;
+    const r = spec?.required_assets ?? 'none';
+    return r === 'video' || r === 'image+video';
+  };
+
   useEffect(() => {
     if (selectedModelId) {
       const selectedModel = models.find((m) => m.id === selectedModelId);
@@ -141,6 +98,12 @@ export default function Playground() {
       setTaskModality(null);
     }
   }, [selectedModelId, models]);
+
+  // Reset task assets when model changes
+  useEffect(() => {
+    setTaskImageUrl('');
+    setTaskVideoUrl('');
+  }, [selectedModelId]);
 
   // Fetch models (including pending_research for polling)
   const fetchModels = useCallback(async () => {
@@ -219,25 +182,35 @@ export default function Playground() {
 
       setIterationStatus(status);
 
-      // Update iteration with results using functional update so we never overwrite based on stale closure
+      if (status.error) setError(status.error);
+
+      // Merge candidates when they arrive from background (status.generating → status.pending)
+      const incoming = status.candidates?.length ? status.candidates : null;
+
       setIteration((prev) => {
         if (!prev || prev.id !== status.iterationId) return prev;
+        const candidates = incoming
+          ? incoming.map((c) => ({ ...c, generator: 'gemini-fallback' as const }))
+          : prev.candidates;
         const updatedIteration: Iteration = {
           ...prev,
+          task: (status.task ?? prev.task) as TaskSpec,
+          candidates,
           results: status.runs.map((run) => ({
             candidateId: run.candidateId,
-            output: run.output || { type: 'text', text: run.error || 'No output' },
-            meta: {
-              latencyMs: run.latencyMs,
-            },
+            assets: run.assets?.length
+              ? run.assets
+              : [{ type: 'text' as const, content: run.error || 'No output' }],
+            metadata: { latencyMs: run.latencyMs },
           })),
         };
         return updatedIteration;
       });
 
-      // Initialize or extend feedback for this iteration (idempotent: only when still active)
+      // Initialize or extend feedback (from runs or candidates)
       setFeedback((prev) => {
-        const candidateIds = status.runs.map((r) => r.candidateId);
+        const candidateIds =
+          status.candidates?.map((c) => c.id) ?? status.runs.map((r) => r.candidateId);
         if (prev.length === 0 || prev.length !== candidateIds.length) {
           return candidateIds.map((candidateId) => ({ candidateId, selected: false, note: '' }));
         }
@@ -247,7 +220,8 @@ export default function Playground() {
         return [...prev, ...newIds.map((candidateId) => ({ candidateId, selected: false, note: '' }))];
       });
 
-      return status.allDone;
+      const isGenerating = status.status === 'generating';
+      return !isGenerating && status.allDone;
     } catch (err) {
       console.error('Polling error:', err);
       setError(err instanceof Error ? err.message : 'Failed to fetch iteration status');
@@ -259,7 +233,8 @@ export default function Playground() {
   useEffect(() => {
     if (!iteration) return;
 
-    if (iterationStatus?.allDone) return;
+    if (iterationStatus?.allDone && iterationStatus?.status !== 'generating') return;
+    if (iterationStatus?.status === 'error') return;
     if (error && error.includes('Failed to fetch status')) return;
 
     const iterationId = iteration.id;
@@ -277,7 +252,7 @@ export default function Playground() {
     const intervalId = setInterval(runPoll, 2000);
 
     return () => clearInterval(intervalId);
-  }, [iteration, iteration?.id, iterationStatus?.allDone, pollIterationStatus, error]);
+  }, [iteration?.id ?? null, iterationStatus, pollIterationStatus, error ?? null]);
 
   const handleAddModel = async () => {
     const endpointId = customEndpointId.trim();
@@ -325,13 +300,30 @@ export default function Playground() {
   };
 
   const handleGenerate = async () => {
-    if (!selectedModelId || !taskGoal.trim()) {
-      setError('Please select a model and enter a task goal');
+    if (!selectedModelId) {
+      setError('Please select a model');
       return;
     }
 
     if (!taskModality) {
       setError('Modality could not be determined from selected model');
+      return;
+    }
+
+    const selectedModel = models.find((m) => m.id === selectedModelId);
+    const reqImage = selectedModel ? requiresImageInput(selectedModel) : false;
+    const reqVideo = selectedModel ? requiresVideoInput(selectedModel) : false;
+
+    if (reqImage && !taskImageUrl.trim()) {
+      setError('This model requires an input image. Please upload an image.');
+      return;
+    }
+    if (reqVideo && !taskVideoUrl.trim()) {
+      setError('This model requires an input video. Please upload a video.');
+      return;
+    }
+    if (!taskGoal.trim()) {
+      setError('Please enter a task goal');
       return;
     }
 
@@ -343,25 +335,44 @@ export default function Playground() {
     setFeedback([]);
 
     try {
+      const assets: TaskSpec['assets'] = [];
+      if (taskVideoUrl.trim()) assets.push({ type: 'video', url: taskVideoUrl.trim() });
+
       const task: TaskSpec = {
         goal: taskGoal.trim(),
         modality: taskModality,
+        ...(assets.length > 0 && { assets }),
       };
 
-      const controller = new AbortController();
-      const timeoutId = setTimeout(() => controller.abort(), 90_000); // 90s timeout
+      // Use FormData when image exists: avoids JSON body size limit (base64 images can be huge)
+      let body: string | FormData;
+      let headers: Record<string, string> = {};
+
+      if (taskImageUrl.trim() && taskImageUrl.startsWith('data:')) {
+        const formData = new FormData();
+        formData.append('task', JSON.stringify({ ...task, assets: task.assets }));
+        formData.append('modelEndpointId', selectedModelId);
+        // Convert data URL to Blob and append as file
+        const res = await fetch(taskImageUrl);
+        const blob = await res.blob();
+        formData.append('image', blob, 'image.jpg');
+        body = formData;
+        // Do NOT set Content-Type - fetch will set multipart boundary
+      } else if (taskImageUrl.trim()) {
+        assets.push({ type: 'image', url: taskImageUrl.trim() });
+        task.assets = assets;
+        body = JSON.stringify({ task, modelEndpointId: selectedModelId });
+        headers = { 'Content-Type': 'application/json' };
+      } else {
+        body = JSON.stringify({ task, modelEndpointId: selectedModelId });
+        headers = { 'Content-Type': 'application/json' };
+      }
 
       const response = await fetch('/api/iterations/generate', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          task,
-          modelEndpointId: selectedModelId,
-        }),
-        signal: controller.signal,
+        headers,
+        body,
       });
-
-      clearTimeout(timeoutId);
 
       if (!response.ok) {
         const data = await response.json().catch(() => ({}));
@@ -373,23 +384,19 @@ export default function Playground() {
       setIterationIndex(1);
       setIteration(newIteration);
 
-      // Initialize feedback
+      // Initialize feedback (empty until candidates arrive via poll)
       setFeedback(
-        newIteration.candidates.map((candidate) => ({
+        (newIteration.candidates ?? []).map((candidate) => ({
           candidateId: candidate.id,
           selected: false,
           note: '',
         }))
       );
 
-      // Start polling
+      // Poll for candidates + run results (no client timeout; server runs in background)
       await pollIterationStatus(newIteration.id);
     } catch (err) {
-      if (err instanceof Error && err.name === 'AbortError') {
-        setError('Request timed out (90s). Check network and GEMINI_API_KEY, then try again.');
-      } else {
-        setError(err instanceof Error ? err.message : 'An error occurred');
-      }
+      setError(err instanceof Error ? err.message : 'An error occurred');
     } finally {
       setLoading(false);
     }
@@ -485,7 +492,7 @@ export default function Playground() {
   };
 
   const renderOutputPreview = (
-    output: RunOutput | undefined,
+    assets: OutputAsset[] | undefined,
     status: string,
     result?: { error?: string; queuePosition?: number },
     onImageClick?: (url: string) => void
@@ -521,50 +528,36 @@ export default function Playground() {
       );
     }
 
-    if (!output) return null;
+    if (!assets?.length) return null;
 
-    if (output.type === 'image' && output.images) {
-      const single = output.images.length === 1;
+    const images = assets.filter((a): a is OutputAsset & { type: 'image' } => a.type === 'image');
+    const videos = assets.filter((a): a is OutputAsset & { type: 'video' } => a.type === 'video');
+    const texts = assets.filter((a): a is OutputAsset & { type: 'text' } => a.type === 'text');
+
+    if (images.length > 0) {
+      const single = images.length === 1;
       return (
         <div className={`grid h-full w-full ${single ? 'grid-cols-1' : 'grid-cols-2'} gap-1.5`}>
-          {output.images.slice(0, 4).map((img, idx) => (
-            <button
-              key={img.url ?? idx}
-              type="button"
-              onClick={() => onImageClick?.(img.url)}
-              className="relative aspect-square w-full min-h-0 overflow-hidden rounded-lg border border-zinc-200 bg-zinc-100 shadow-sm transition hover:shadow focus:outline-none focus:ring-2 focus:ring-zinc-400 dark:border-zinc-700 dark:bg-zinc-800"
-            >
-              <Image
-                src={img.url}
-                alt={`Output ${idx + 1}`}
-                fill
-                className="object-cover cursor-pointer"
-                unoptimized
-              />
-            </button>
+          {images.slice(0, 4).map((asset, idx) => (
+            <OutputPreview key={asset.url + idx} asset={asset} onImageClick={onImageClick} className="h-full" />
           ))}
         </div>
       );
     }
 
-    if (output.type === 'video' && output.videos) {
+    if (videos.length > 0) {
       return (
         <div className="h-full w-full space-y-1">
-          {output.videos.slice(0, 2).map((vid, idx) => (
-            <video
-              key={vid.url ?? idx}
-              src={vid.url}
-              controls
-              className="h-full w-full rounded-lg border border-zinc-200 object-cover dark:border-zinc-700"
-            />
+          {videos.slice(0, 2).map((asset, idx) => (
+            <OutputPreview key={asset.url + idx} asset={asset} className="h-full" />
           ))}
         </div>
       );
     }
 
-    if (output.type === 'text') {
-      // Backward compatibility: if text is a single image URL (e.g. stored before fix), render as image
-      const t = output.text?.trim() ?? '';
+    if (texts.length > 0) {
+      const t = texts.map((x) => x.content).join(' ').trim();
+      if (!t) return null;
       if (t.startsWith('http') && !t.includes(' ')) {
         return (
           <div className="relative h-full w-full rounded-lg border border-zinc-200 bg-zinc-100 dark:border-zinc-700 dark:bg-zinc-800">
@@ -579,11 +572,7 @@ export default function Playground() {
           </div>
         );
       }
-      return (
-        <div className="h-full w-full overflow-auto rounded-lg border border-zinc-200 bg-white px-2 py-1.5 text-xs text-zinc-700 dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-200">
-          {output.text}
-        </div>
-      );
+      return <OutputPreview asset={{ type: 'text', content: t }} className="h-full w-full" />;
     }
 
     return null;
@@ -651,7 +640,7 @@ export default function Playground() {
                         const isResearching = model.status === 'pending_research' || ['queued', 'running'].includes(jobStatus ?? '');
                         return (
                           <option key={model.id} value={model.id}>
-                            {model.endpointId} ({model.modality})
+                            {model.endpointId} — {mapModalityFromModel(model)}
                             {isResearching && ' [Researching...]'}
                             {model.status === 'active' && model.modelSpecs.length === 0 && ' [No Spec]'}
                           </option>
@@ -749,21 +738,115 @@ export default function Playground() {
               </div>
             </div>
 
-            {/* Task Goal */}
-            <div>
-              <label className="block text-sm font-medium text-zinc-700 dark:text-zinc-300">
-                Task Goal
-              </label>
-              <textarea
-                value={taskGoal}
-                onChange={(e) => setTaskGoal(e.target.value)}
-                rows={3}
-                placeholder="e.g., dress the cat in a skirt and make it dance"
-                className="mt-1 block w-full rounded-md border border-zinc-300 px-3 py-2 shadow-sm focus:border-zinc-500 focus:outline-none focus:ring-zinc-500 dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-50"
-              />
-            </div>
+            {/* Task: same flow for every model; image/video upload only when required_assets needs them (no param forms) */}
+            {selectedModelId && (() => {
+              const selectedModel = models.find((m) => m.id === selectedModelId);
+              if (!selectedModel) return null;
+              const reqImage = requiresImageInput(selectedModel);
+              const reqVideo = requiresVideoInput(selectedModel);
+              const taskLabel = taskModality === 'image-to-video' ? 'Motion description' : 'Task goal';
+              const taskPlaceholder = taskModality === 'image-to-video'
+                ? 'e.g., smooth camera pan, character walking forward'
+                : 'e.g., dress the cat in a skirt and make it dance';
 
-            {/* Modality Display (read-only; from ModelSpec or DB fallback) */}
+              return (
+                <>
+                  {/* Task goal (or motion description for image-to-video) */}
+                  <div>
+                    <label className="block text-sm font-medium text-zinc-700 dark:text-zinc-300">
+                      {taskLabel}
+                    </label>
+                    <textarea
+                      value={taskGoal}
+                      onChange={(e) => setTaskGoal(e.target.value)}
+                      rows={3}
+                      placeholder={taskPlaceholder}
+                      className="mt-1 block w-full rounded-md border border-zinc-300 px-3 py-2 shadow-sm focus:border-zinc-500 focus:outline-none focus:ring-zinc-500 dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-50"
+                    />
+                  </div>
+
+                  {/* Image upload: only when model requires image (required_assets) */}
+                  {reqImage && (
+                    <div>
+                      <label className="block text-sm font-medium text-zinc-700 dark:text-zinc-300">
+                        Input image <span className="ml-1 text-red-500">*</span>
+                      </label>
+                      <div className="mt-1 flex items-center gap-2">
+                        <input
+                          type="file"
+                          accept="image/*"
+                          onChange={async (e) => {
+                            const f = e.target.files?.[0];
+                            if (f) {
+                              try {
+                                const dataUrl = await compressImageToDataUrl(f);
+                                setTaskImageUrl(dataUrl);
+                              } catch (err) {
+                                console.error('Image compression failed:', err);
+                                setError('Could not process image. Try a smaller file.');
+                                setTaskImageUrl('');
+                              }
+                            } else {
+                              setTaskImageUrl('');
+                            }
+                          }}
+                          className="block w-full text-sm text-zinc-600 file:mr-3 file:rounded-md file:border-0 file:bg-zinc-100 file:px-4 file:py-2 file:text-sm file:font-medium file:text-zinc-700 hover:file:bg-zinc-200 dark:file:bg-zinc-700 dark:file:text-zinc-300"
+                        />
+                        {taskImageUrl && (
+                          <button
+                            type="button"
+                            onClick={() => setTaskImageUrl('')}
+                            className="text-xs text-zinc-500 hover:text-zinc-700 dark:hover:text-zinc-400"
+                          >
+                            Clear
+                          </button>
+                        )}
+                      </div>
+                      {taskImageUrl && (
+                        <div className="mt-2 relative h-24 w-24 rounded-lg overflow-hidden border border-zinc-200 dark:border-zinc-700">
+                          <Image src={taskImageUrl} alt="Task image" fill className="object-cover" unoptimized />
+                        </div>
+                      )}
+                    </div>
+                  )}
+
+                  {/* Video upload: only when model requires video (required_assets) */}
+                  {reqVideo && (
+                    <div>
+                      <label className="block text-sm font-medium text-zinc-700 dark:text-zinc-300">
+                        Input video <span className="ml-1 text-red-500">*</span>
+                      </label>
+                      <input
+                        type="file"
+                        accept="video/*"
+                        onChange={(e) => {
+                          const f = e.target.files?.[0];
+                          if (f) {
+                            const r = new FileReader();
+                            r.onload = () => setTaskVideoUrl(String(r.result));
+                            r.readAsDataURL(f);
+                          } else {
+                            setTaskVideoUrl('');
+                          }
+                        }}
+                        className="mt-1 block w-full text-sm text-zinc-600 file:mr-3 file:rounded-md file:border-0 file:bg-zinc-100 file:px-4 file:py-2 file:text-sm file:font-medium file:text-zinc-700 hover:file:bg-zinc-200 dark:file:bg-zinc-700 dark:file:text-zinc-300"
+                      />
+                      {taskVideoUrl && (
+                        <button
+                          type="button"
+                          onClick={() => setTaskVideoUrl('')}
+                          className="mt-1 text-xs text-zinc-500 hover:text-zinc-700 dark:hover:text-zinc-400"
+                        >
+                          Clear
+                        </button>
+                      )}
+                    </div>
+                  )}
+                </>
+              );
+            })()}
+
+            {/* Modality Display (read-only; from ModelSpec) */}
             {selectedModelId && (() => {
               const selectedModel = models.find((m) => m.id === selectedModelId);
               const hasSpec = selectedModel?.modelSpecs && selectedModel.modelSpecs.length > 0;
@@ -804,7 +887,19 @@ export default function Playground() {
             {/* Generate Button */}
             <button
               onClick={handleGenerate}
-              disabled={loading || !selectedModelId || !taskGoal.trim() || !taskModality}
+              disabled={Boolean(
+                loading ||
+                !selectedModelId ||
+                !taskModality ||
+                !taskGoal.trim() ||
+                (selectedModelId && (() => {
+                  const m = models.find((x) => x.id === selectedModelId);
+                  if (!m) return false;
+                  if (requiresImageInput(m) && !taskImageUrl.trim()) return true;
+                  if (requiresVideoInput(m) && !taskVideoUrl.trim()) return true;
+                  return false;
+                })())
+              )}
               className="w-full rounded-md bg-zinc-900 px-4 py-2 text-sm font-medium text-white hover:bg-zinc-800 focus:outline-none focus:ring-2 focus:ring-zinc-500 focus:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-50 dark:bg-zinc-50 dark:text-zinc-900 dark:hover:bg-zinc-100"
             >
               {loading ? 'Generating...' : 'Generate 20 Candidates'}
@@ -870,6 +965,8 @@ export default function Playground() {
             <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-3">
               {iteration.candidates.map((candidate) => {
                 const result = getCandidateResult(candidate.id);
+                const iterResult = iteration.results?.find((r) => r.candidateId === candidate.id);
+                const assets = result?.assets ?? iterResult?.assets;
                 const status = result?.status || 'queued';
                 const feedbackItem = feedback.find((f) => f.candidateId === candidate.id);
 
@@ -887,7 +984,7 @@ export default function Playground() {
                       <div className="absolute inset-0 flex items-center justify-center p-2">
                         <div className="h-full w-full min-h-0 min-w-0">
                           {renderOutputPreview(
-                            result?.output,
+                            assets,
                             status,
                             result ? { error: result.error, queuePosition: result.queuePosition } : undefined,
                             setLightboxImageUrl
@@ -895,7 +992,7 @@ export default function Playground() {
                         </div>
                       </div>
                     </figure>
-                    {/* Caption: status, prompt, params, refine — görselin hemen altında */}
+                    {/* Caption: status, prompt, refine — görselin hemen altında */}
                     <div className="flex min-h-0 flex-col p-3">
                       <div className="mb-2 flex flex-wrap items-center gap-1.5">
                         <span
@@ -912,24 +1009,6 @@ export default function Playground() {
                           {status === 'queued' ? 'Queued' : status === 'running' ? 'Running' : status === 'error' ? 'Error' : 'Done'}
                         </span>
                       </div>
-                      {candidate.params && Object.keys(candidate.params).length > 0 && (
-                        <div className="mb-2">
-                          <span className="mb-1 block text-[10px] font-semibold uppercase tracking-wider text-zinc-500 dark:text-zinc-400">
-                            Params
-                          </span>
-                          <div className="flex flex-wrap gap-1.5">
-                            {Object.entries(candidate.params).map(([key, value]) => (
-                              <span
-                                key={key}
-                                className="inline-flex rounded-md bg-zinc-200/90 px-2 py-0.5 font-mono text-[11px] text-zinc-700 dark:bg-zinc-700 dark:text-zinc-300"
-                                title={`${key}: ${value}`}
-                              >
-                                {key}: {String(value)}
-                              </span>
-                            ))}
-                          </div>
-                        </div>
-                      )}
                       <div className="min-h-0 flex-1">
                         <div className="max-h-28 overflow-y-auto rounded border border-zinc-100 bg-zinc-50/80 px-2 py-1.5 dark:border-zinc-800 dark:bg-zinc-800/50">
                           <p className="text-[13px] leading-snug text-zinc-700 dark:text-zinc-300 whitespace-pre-wrap">

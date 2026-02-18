@@ -43,9 +43,9 @@ export async function PATCH(
     const body = await request.json();
     const { status } = body;
 
-    if (!status || !['active', 'disabled', 'pending_research'].includes(status)) {
+    if (!status || !['active', 'disabled', 'pending_research', 'research_failed'].includes(status)) {
       return NextResponse.json(
-        { error: 'Invalid status. Must be: active, disabled, or pending_research' },
+        { error: 'Invalid status. Must be: active, disabled, pending_research, or research_failed' },
         { status: 400 }
       );
     }

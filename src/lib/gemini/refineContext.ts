@@ -4,7 +4,7 @@
  */
 
 import { summarizeRunOutput } from './promptTemplates';
-import type { RunOutput } from '@/src/core/types';
+import { normalizeStoredOutputToAssets } from '@/src/core/types';
 import type { SelectedWithNote } from './promptTemplates';
 
 export interface SelectedFeedbackItem {
@@ -21,7 +21,7 @@ export interface SelectedPromptItem {
 
 export interface RunWithOutput {
   candidateId: string;
-  outputJson?: RunOutput | null;
+  outputJson?: unknown;
 }
 
 /**
@@ -35,11 +35,11 @@ export function buildRefineContext(
   return selectedFeedback.map((item) => {
     const withText = selectedPrompts?.find((s) => s.candidateId === item.candidateId);
     const run = previousRuns.find((r) => r.candidateId === item.candidateId);
-    const output = run?.outputJson ?? undefined;
+    const assets = normalizeStoredOutputToAssets(run?.outputJson);
     return {
       prompt: withText?.prompt ?? `Selected candidate ${item.candidateId}`,
       note: item.note,
-      outputSummary: summarizeRunOutput(output),
+      outputSummary: summarizeRunOutput(assets),
     };
   });
 }

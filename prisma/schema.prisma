@@ -20,9 +20,10 @@ model User {
   role          String    @default("USER") @db.VarChar(20) // "ADMIN" | "USER"
   createdAt     DateTime  @default(now()) @map("created_at")
 
-  accounts Account[]
-  sessions Session[]
-  providerKeys UserProviderKey[]
+  accounts      Account[]
+  sessions      Session[]
+  providerKeys  UserProviderKey[]
+  modelEndpoints ModelEndpoint[]
 
   @@map("users")
 }
@@ -84,22 +85,25 @@ model VerificationToken {
 }
 
 model ModelEndpoint {
-  id            String    @id @default(uuid())
-  endpointId    String    @map("endpoint_id") @db.VarChar(255)
-  kind          String    @db.VarChar(50) // "model" | "workflow"
-  modality      String    @db.VarChar(50) // "text" | "image" | "video"
-  status        String    @default("pending_research") @db.VarChar(50) // "pending_research" | "active" | "disabled"
-  source        String    @default("fal.ai") @db.VarChar(100)
-  provider      String    @default("falai") @db.VarChar(50) // "falai" | "eachlabs" — runtime execution provider
-  createdAt     DateTime  @default(now()) @map("created_at")
-  lastCheckedAt DateTime? @map("last_checked_at")
+  id              String    @id @default(uuid())
+  endpointId      String    @map("endpoint_id") @db.VarChar(255)
+  kind            String    @db.VarChar(50) // "model" | "workflow"
+  modality        String    @db.VarChar(50) // "text" | "image" | "video"
+  status          String    @default("pending_research") @db.VarChar(50) // "pending_research" | "active" | "research_failed" | "disabled"
+  source          String    @default("fal.ai") @db.VarChar(100)
+  provider        String    @default("falai") @db.VarChar(50) // "falai" | "eachlabs" — runtime execution provider
+  addedByUserId   String?   @map("added_by_user_id")
+  createdAt       DateTime  @default(now()) @map("created_at")
+  lastCheckedAt   DateTime? @map("last_checked_at")
 
   // Relations
+  addedByUser   User?      @relation(fields: [addedByUserId], references: [id], onDelete: SetNull)
   modelSpecs    ModelSpec[]
-  researchJobs ResearchJob[]
+  researchJobs  ResearchJob[]
   runs          Run[]
 
   @@unique([endpointId, source])
+  @@index([addedByUserId])
   @@index([status])
   @@index([source])
   @@index([provider])
@@ -147,6 +151,9 @@ model Iteration {
   userId          String?   @map("user_id") // Blok B: owner for provider key lookup
   startedAt       DateTime  @default(now()) @map("started_at")
   finishedAt      DateTime? @map("finished_at")
+  taskJson        Json?     @map("task_json") // task for background generate
+  candidatesJson  Json?     @map("candidates_json") // populated when Gemini completes
+  errorMessage    String?   @map("error_message") @db.Text // if background generate fails
 
   @@index([startedAt])
   @@index([modelEndpointId])

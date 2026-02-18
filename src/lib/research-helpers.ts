@@ -12,9 +12,44 @@ import {
   findEachLabsModel,
   eachLabsDetailToFalMetadata,
 } from '@/src/providers/eachlabs/helpers';
+import type { Modality } from '@/src/core/types';
+import type { ModelSpec, RequiredAssets } from '@/src/core/modelSpec';
+import { determineModalityFromCategory } from '@/src/providers/falai/helpers';
+
+const MAX_CONCURRENT_RESEARCH = 2;
+let activeResearchCount = 0;
+const researchQueue: string[] = [];
 
 /**
- * Update research job status to error
+ * Derive modality + required_assets from endpoint metadata (Sprint 7: no schema parsing).
+ * required_assets is always 'none' — deterministic, no param/schema extraction.
+ */
+function deriveModalityAndAssets(
+  dbModality: string | null | undefined,
+  category: string | undefined
+): { modality: Modality; required_assets: RequiredAssets } {
+  const raw = determineModalityFromCategory(category) ?? dbModality?.toLowerCase() ?? 'text';
+  if (raw === 'image') {
+    return { modality: 'text-to-image', required_assets: 'none' };
+  }
+  if (raw === 'video') {
+    return { modality: 'text-to-video', required_assets: 'none' };
+  }
+  return { modality: 'text-to-text', required_assets: 'none' };
+}
+
+function processNextQueuedJob(): void {
+  if (activeResearchCount >= MAX_CONCURRENT_RESEARCH || researchQueue.length === 0) return;
+  const jobId = researchQueue.shift();
+  if (jobId) {
+    runResearchJob(jobId).catch((err) => {
+      console.error(`Research job ${jobId} failed:`, err);
+    });
+  }
+}
+
+/**
+ * Update research job status to error and set ModelEndpoint to research_failed
  */
 export async function updateResearchJobError(
   researchJobId: string,
@@ -22,6 +57,11 @@ export async function updateResearchJobError(
 ): Promise<void> {
   const errorMessage =
     error instanceof Error ? error.message : 'Unknown error';
+
+  const job = await prisma.researchJob.findUnique({
+    where: { id: researchJobId },
+    select: { modelEndpointId: true },
+  });
 
   await prisma.researchJob.update({
     where: { id: researchJobId },
@@ -31,13 +71,25 @@ export async function updateResearchJobError(
       finishedAt: new Date(),
     },
   });
+
+  if (job?.modelEndpointId) {
+    await prisma.modelEndpoint.update({
+      where: { id: job.modelEndpointId },
+      data: { status: 'research_failed' },
+    });
+  }
 }
 
 /**
  * Run a single research job by ID (fetch metadata, Gemini research, save spec, set active).
- * Call this from validate route in background, or from /api/research/process with admin.
+ * Global concurrency limit: max 2 running. Excess jobs are queued.
  */
 export async function runResearchJob(researchJobId: string): Promise<void> {
+  if (activeResearchCount >= MAX_CONCURRENT_RESEARCH) {
+    researchQueue.push(researchJobId);
+    return;
+  }
+
   const researchJob = await prisma.researchJob.findUnique({
     where: { id: researchJobId },
     include: { modelEndpoint: true },
@@ -49,6 +101,8 @@ export async function runResearchJob(researchJobId: string): Promise<void> {
   if (researchJob.status !== 'queued' && researchJob.status !== 'running') {
     return; // already done or error
   }
+
+  activeResearchCount++;
 
   const modelEndpoint = researchJob.modelEndpoint;
 
@@ -68,11 +122,14 @@ export async function runResearchJob(researchJobId: string): Promise<void> {
         tags?: string[];
       };
     };
+    let eachLabsDetail: Awaited<ReturnType<typeof findEachLabsModel>> = null;
+
     if (modelEndpoint.source === 'eachlabs') {
       const detail = await findEachLabsModel(modelEndpoint.endpointId);
       if (!detail) {
         throw new Error(`Model not found in EachLabs: ${modelEndpoint.endpointId}`);
       }
+      eachLabsDetail = detail;
       modelMetadata = eachLabsDetailToFalMetadata(detail);
     } else {
       const falClient = createFalAIClientFromEnv();
@@ -83,11 +140,25 @@ export async function runResearchJob(researchJobId: string): Promise<void> {
       modelMetadata = falMetadata;
     }
 
-    const modelSpec = await researchModelWithGemini(
+    // 1) Modality + required_assets: derived from metadata only (Sprint 7: no schema converters).
+    const derived = deriveModalityAndAssets(modelEndpoint.modality, modelMetadata.metadata?.category);
+    const modality = derived.modality;
+    const required_assets = derived.required_assets;
+
+    // 2) Gemini produces only prompt guidelines + summary (never modality/required_assets/params)
+    const modalityForPrompt = typeof modality === 'string' ? modality : 'text-to-image';
+    const guidelines = await researchModelWithGemini(
       modelMetadata as FalAIModelMetadata,
       modelEndpoint.kind as 'model' | 'workflow',
-      modelEndpoint.modality
+      modalityForPrompt
     );
+
+    const modelSpec: ModelSpec = {
+      modality,
+      required_assets,
+      prompt_guidelines: guidelines.prompt_guidelines,
+      summary: guidelines.summary,
+    };
 
     const specJson: Prisma.InputJsonValue = JSON.parse(JSON.stringify(modelSpec));
     await prisma.modelSpec.create({
@@ -111,5 +182,8 @@ export async function runResearchJob(researchJobId: string): Promise<void> {
   } catch (error) {
     await updateResearchJobError(researchJob.id, error);
     throw error;
+  } finally {
+    activeResearchCount--;
+    processNextQueuedJob();
   }
 }

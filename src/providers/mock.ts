@@ -9,7 +9,7 @@ import type {
   PromptGenerationResult,
   RunCandidatesResult,
 } from './types';
-import type { TaskSpec, ModelRef, CandidatePrompt, RunResult, RunOutput } from '@/src/core/types';
+import type { TaskSpec, ModelRef, CandidatePrompt, RunResult } from '@/src/core/types';
 
 /**
  * Generate mock prompt variations
@@ -127,41 +127,17 @@ export class MockProviderAdapter implements ProviderAdapter {
         // Immediately update to "done" with mock result (simulates instant completion)
         const latencyMs = Math.floor(Math.random() * 500) + 200; // 200-700ms
         
-        // Determine output type based on task modality
-        let output: RunOutput;
-        if (task.modality === 'text-to-text') {
-          output = {
-            type: 'text',
-            text: `Mock text output for prompt: "${candidate.prompt.substring(0, 50)}${candidate.prompt.length > 50 ? '...' : ''}"`,
-          };
-        } else if (
-          task.modality === 'text-to-image' ||
-          task.modality === 'image-to-image'
-        ) {
-          output = {
-            type: 'image',
-            images: [{ url: `https://placeholder.image/mock-${candidate.id}.png` }],
-          };
-        } else if (
-          task.modality === 'text-to-video' ||
-          task.modality === 'image-to-video' ||
-          task.modality === 'video-to-video'
-        ) {
-          output = {
-            type: 'video',
-            videos: [{ url: `https://placeholder.video/mock-${candidate.id}.mp4` }],
-          };
-        } else {
-          output = {
-            type: 'text',
-            text: `Mock output for prompt: "${candidate.prompt.substring(0, 50)}${candidate.prompt.length > 50 ? '...' : ''}"`,
-          };
-        }
-        
-        // Update Run to "done" with mock result
+        const assets = task.modality === 'text-to-text'
+          ? [{ type: 'text' as const, content: `Mock text output for prompt: "${candidate.prompt.substring(0, 50)}${candidate.prompt.length > 50 ? '...' : ''}"` }]
+          : task.modality === 'text-to-image' || task.modality === 'image-to-image'
+            ? [{ type: 'image' as const, url: `https://placeholder.image/mock-${candidate.id}.png` }]
+            : task.modality === 'text-to-video' || task.modality === 'image-to-video' || task.modality === 'video-to-video'
+              ? [{ type: 'video' as const, url: `https://placeholder.video/mock-${candidate.id}.mp4` }]
+              : [{ type: 'text' as const, content: `Mock output for prompt: "${candidate.prompt.substring(0, 50)}${candidate.prompt.length > 50 ? '...' : ''}"` }];
+
         await updateRun(context.iterationId!, candidate.id, {
           status: 'done',
-          outputJson: output,
+          outputJson: { assets },
           latencyMs,
         });
       }
@@ -170,66 +146,34 @@ export class MockProviderAdapter implements ProviderAdapter {
       return { results: [] };
     }
     const results: RunResult[] = candidates.map((candidate, index) => {
-      const latencyMs = Math.floor(Math.random() * 1000) + 100; // 100-1100ms
+      const latencyMs = Math.floor(Math.random() * 1000) + 100;
 
-      // Determine output type based on task modality
       if (task.modality === 'text-to-text') {
         return {
           candidateId: candidate.id,
-          output: {
-            type: 'text',
-            text: `Mock text output ${index + 1} for prompt: "${candidate.prompt.substring(0, 50)}${candidate.prompt.length > 50 ? '...' : ''}"`,
-          },
-          meta: {
-            latencyMs,
-          },
-        };
-      } else if (
-        task.modality === 'text-to-image' ||
-        task.modality === 'image-to-image'
-      ) {
-        return {
-          candidateId: candidate.id,
-          output: {
-            type: 'image',
-            images: [
-              { url: `https://placeholder.image/mock-${candidate.id}.png` },
-            ],
-          },
-          meta: {
-            latencyMs,
-          },
-        };
-      } else if (
-        task.modality === 'text-to-video' ||
-        task.modality === 'image-to-video' ||
-        task.modality === 'video-to-video'
-      ) {
-        return {
-          candidateId: candidate.id,
-          output: {
-            type: 'video',
-            videos: [
-              { url: `https://placeholder.video/mock-${candidate.id}.mp4` },
-            ],
-          },
-          meta: {
-            latencyMs,
-          },
-        };
-      } else {
-        // Fallback to text
-        return {
-          candidateId: candidate.id,
-          output: {
-            type: 'text',
-            text: `Mock output ${index + 1} for prompt: "${candidate.prompt.substring(0, 50)}${candidate.prompt.length > 50 ? '...' : ''}"`,
-          },
-          meta: {
-            latencyMs,
-          },
+          assets: [{ type: 'text' as const, content: `Mock text output ${index + 1} for prompt: "${candidate.prompt.substring(0, 50)}${candidate.prompt.length > 50 ? '...' : ''}"` }],
+          metadata: { latencyMs },
         };
       }
+      if (task.modality === 'text-to-image' || task.modality === 'image-to-image') {
+        return {
+          candidateId: candidate.id,
+          assets: [{ type: 'image' as const, url: `https://placeholder.image/mock-${candidate.id}.png` }],
+          metadata: { latencyMs },
+        };
+      }
+      if (task.modality === 'text-to-video' || task.modality === 'image-to-video' || task.modality === 'video-to-video') {
+        return {
+          candidateId: candidate.id,
+          assets: [{ type: 'video' as const, url: `https://placeholder.video/mock-${candidate.id}.mp4` }],
+          metadata: { latencyMs },
+        };
+      }
+      return {
+        candidateId: candidate.id,
+        assets: [{ type: 'text' as const, content: `Mock output ${index + 1} for prompt: "${candidate.prompt.substring(0, 50)}${candidate.prompt.length > 50 ? '...' : ''}"` }],
+        metadata: { latencyMs },
+      };
     });
 
     return { results };

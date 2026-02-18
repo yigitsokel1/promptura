@@ -3,6 +3,15 @@
  */
 
 import { POST as RefinePOST } from '../refine/route';
+
+// after() must be mocked - real after() throws outside request scope in tests
+jest.mock('next/server', () => {
+  const actual = jest.requireActual<typeof import('next/server')>('next/server');
+  return {
+    ...actual,
+    after: (fn: () => void | Promise<unknown>) => void fn(),
+  };
+});
 import { POST as GeneratePOST } from '../generate/route';
 import { NextRequest } from 'next/server';
 import type { TaskSpec } from '@/src/core/types';
@@ -31,8 +40,8 @@ const mockModelEndpoint = {
     {
       id: 'spec-id-123',
       specJson: {
-        inputs: [{ name: 'prompt', type: 'string', required: true }],
-        outputs: { type: 'image', format: 'url[]' },
+        modality: 'text-to-image',
+        required_assets: 'none',
         prompt_guidelines: ['Use clear descriptions'],
       },
       researchedAt: new Date(),
@@ -62,7 +71,11 @@ jest.mock('@/src/db/client', () => ({
   prisma: {
     modelEndpoint: { findUnique: jest.fn() },
     run: { findMany: jest.fn() },
-    iteration: { upsert: jest.fn() },
+    iteration: {
+      upsert: jest.fn(() => Promise.resolve()),
+      updateMany: jest.fn(() => Promise.resolve()),
+      findUnique: jest.fn(),
+    },
   },
 }));
 
@@ -70,6 +83,8 @@ jest.mock('@/src/db/queries', () => ({
   findModelEndpointWithSpecOnly: jest.fn(),
   findRunsByIterationId: jest.fn(() => Promise.resolve([])),
   createIterationRecord: jest.fn(() => Promise.resolve()),
+  updateIterationWithCandidates: jest.fn(() => Promise.resolve()),
+  updateIterationError: jest.fn(() => Promise.resolve()),
 }));
 
 describe('POST /api/iterations/refine', () => {
@@ -140,6 +155,38 @@ describe('POST /api/iterations/refine', () => {
     expect(iteration.candidates).toHaveLength(10);
   });
 
+  it('returns 400 when model requires image but task has no image asset', async () => {
+    const imageRequiredEndpoint = {
+      ...mockModelEndpoint,
+      modelSpecs: [
+        {
+          id: 'spec-id-123',
+          specJson: { modality: 'image-to-image', required_assets: 'image', prompt_guidelines: [] },
+          researchedAt: new Date(),
+        },
+      ],
+    };
+    (dbQueries.findModelEndpointWithSpecOnly as jest.Mock).mockResolvedValue(imageRequiredEndpoint);
+
+    const request = new NextRequest('http://localhost/api/iterations/refine', {
+      method: 'POST',
+      body: JSON.stringify({
+        task: { goal: 'Style transfer', modality: 'image-to-image' },
+        modelEndpointId: 'model-endpoint-id-123',
+        previousIterationId: 'iter_prev',
+        feedback: [{ candidateId: 'c1', selected: true }],
+        selectedPrompts: [{ candidateId: 'c1', prompt: 'P1' }],
+      }),
+      headers: { 'Content-Type': 'application/json' },
+    });
+
+    const response = await RefinePOST(request);
+    expect(response.status).toBe(400);
+    const data = await response.json();
+    expect(data.error).toBe('Image required.');
+    expect(data.code).toBe('AssetRequired');
+  });
+
   it('returns 400 when no feedback selected', async () => {
     const request = new NextRequest('http://localhost/api/iterations/refine', {
       method: 'POST',
@@ -167,7 +214,7 @@ describe('Generate then Refine happy path', () => {
     (dbQueries.findRunsByIterationId as jest.Mock).mockResolvedValue([]);
   });
 
-  it('generate returns iteration then refine returns new iteration with 10 candidates', async () => {
+  it('generate returns 202 then refine returns new iteration with 10 candidates', async () => {
     const task: TaskSpec = { goal: 'Happy path goal', modality: 'text-to-image' };
 
     const genRequest = new NextRequest('http://localhost/api/iterations/generate', {
@@ -177,19 +224,13 @@ describe('Generate then Refine happy path', () => {
     });
 
     const genResponse = await GeneratePOST(genRequest);
-    expect(genResponse.status).toBe(200);
+    expect(genResponse.status).toBe(202);
     const genIteration = await genResponse.json();
-    expect(genIteration.candidates.length).toBeGreaterThanOrEqual(1);
     const previousId = genIteration.id;
-    const oneCandidateId = genIteration.candidates[0].id;
+    const oneCandidateId = 'refine_test_c1';
 
-    const feedback = [
-      { candidateId: oneCandidateId, selected: true },
-      ...genIteration.candidates.slice(1).map((c: { id: string }) => ({ candidateId: c.id, selected: false })),
-    ];
-    const selectedPrompts = [
-      { candidateId: oneCandidateId, prompt: genIteration.candidates[0].prompt },
-    ];
+    const feedback = [{ candidateId: oneCandidateId, selected: true }];
+    const selectedPrompts = [{ candidateId: oneCandidateId, prompt: 'Test prompt for refine' }];
 
     const refRequest = new NextRequest('http://localhost/api/iterations/refine', {
       method: 'POST',

@@ -1,24 +1,33 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { updateRun, updateIterationFinishedAt, findIterationById } from '@/src/db/queries';
+import {
+  updateRun,
+  updateIterationFinishedAt,
+  findIterationById,
+} from '@/src/db/queries';
+import { prisma } from '@/src/db/client';
 import { handleApiError } from '@/src/lib/api-helpers';
-import type { RunOutput } from '@/src/core/types';
+import type { OutputAsset, TaskSpec } from '@/src/core/types';
+import { normalizeStoredOutputToAssets } from '@/src/core/types';
 import type { ModelSpec } from '@/src/core/modelSpec';
 import { executionProviderFactory } from '@/src/providers/execution';
 import type { ExecutionProviderSlug } from '@/src/providers/execution';
-import { prisma } from '@/src/db/client';
 import { limitConcurrencySettled } from '@/src/lib/concurrency';
 import { requireUserProviderKey, type ProviderSlug } from '@/src/lib/provider-keys';
 import { requireAuth, unauthorizedResponse } from '@/src/lib/auth';
 
 interface StatusResponse {
   iterationId: string;
+  status: 'generating' | 'pending' | 'error';
+  task?: TaskSpec;
+  candidates?: Array<{ id: string; prompt: string }>;
+  error?: string;
   runs: Array<{
     candidateId: string;
     status: 'queued' | 'running' | 'done' | 'error';
-    output?: RunOutput;
+    assets?: OutputAsset[];
     latencyMs?: number;
     error?: string;
-    queuePosition?: number; // Position in fal.ai queue (if IN_QUEUE)
+    queuePosition?: number;
   }>;
   allDone: boolean;
   hasErrors: boolean;
@@ -116,25 +125,24 @@ export async function GET(
                     error: result.error ?? 'Job failed',
                   });
                 } else if (result.output !== undefined && modelSpec) {
-                  const output = executionProvider.convertToRunOutput(result.output, modelSpec);
+                  const assets = executionProvider.convertToOutputAssets(result.output, modelSpec);
                   const latencyMs = Date.now() - run.createdAt.getTime();
                   await updateRun(iterationId, run.candidateId, {
                     status: 'done',
-                    outputJson: output,
+                    outputJson: { assets },
                     latencyMs,
                   });
                 } else if (result.output !== undefined) {
-                  // No modelSpec: coerce URL string or { url } to image so UI renders it
                   const raw = result.output;
-                  const imageOutput: RunOutput =
+                  const assets: OutputAsset[] =
                     typeof raw === 'string' && raw.trim().startsWith('http')
-                      ? { type: 'image', images: [{ url: raw.trim() }] }
+                      ? [{ type: 'image', url: raw.trim() }]
                       : typeof raw === 'object' && raw !== null && 'url' in (raw as object)
-                        ? { type: 'image', images: [{ url: String((raw as { url: unknown }).url) }] }
-                        : { type: 'text', text: JSON.stringify(raw) };
+                        ? [{ type: 'image', url: String((raw as { url: unknown }).url) }]
+                        : [{ type: 'text', content: JSON.stringify(raw) }];
                   await updateRun(iterationId, run.candidateId, {
                     status: 'done',
-                    outputJson: imageOutput,
+                    outputJson: { assets },
                     latencyMs: Date.now() - run.createdAt.getTime(),
                   });
                 }
@@ -212,12 +220,22 @@ export async function GET(
       );
     }
 
+    const iterationRow = await prisma.iteration.findUnique({
+      where: { id: iterationId },
+    });
+    const it = iterationRow as { taskJson?: unknown; candidatesJson?: unknown[]; errorMessage?: string } | null;
     const statusResponse: StatusResponse = {
       iterationId,
+      status: it?.errorMessage ? 'error' : it?.candidatesJson?.length ? 'pending' : 'generating',
+      error: it?.errorMessage,
+      task: it?.taskJson as StatusResponse['task'],
+      candidates: Array.isArray(it?.candidatesJson)
+        ? (it.candidatesJson as Array<{ id: string; prompt: string }>)
+        : undefined,
       runs: runs.map((run) => ({
         candidateId: run.candidateId,
         status: run.status as 'queued' | 'running' | 'done' | 'error',
-        output: run.outputJson as unknown as RunOutput | undefined,
+        assets: normalizeStoredOutputToAssets(run.outputJson),
         latencyMs: run.latencyMs || undefined,
         error: run.error || undefined,
       })),

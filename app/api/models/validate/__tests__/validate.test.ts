@@ -7,11 +7,12 @@ import { NextRequest } from 'next/server';
 import { createFalAIClientFromEnv, extractModelMetadata } from '@/src/providers/falai/helpers';
 import { findEachLabsModel, eachLabsModality } from '@/src/providers/eachlabs/helpers';
 import { prisma } from '@/src/db/client';
+import { requireAuth } from '@/src/lib/auth';
 
 // Mock dependencies
 jest.mock('@/src/lib/auth', () => ({
-  requireAdmin: jest.fn(() =>
-    Promise.resolve({ session: { user: {} }, user: { id: 'admin-id', email: 'admin@test.com', role: 'ADMIN' } })
+  requireAuth: jest.fn(() =>
+    Promise.resolve({ user: { id: 'user-id', email: 'user@test.com' } })
   ),
   unauthorizedResponse: jest.fn(() => new Response(JSON.stringify({ error: 'Unauthorized' }), { status: 401 })),
 }));
@@ -31,6 +32,7 @@ jest.mock('@/src/db/client', () => ({
     modelEndpoint: {
       findFirst: jest.fn(),
       create: jest.fn(),
+      count: jest.fn(),
     },
     researchJob: {
       create: jest.fn(),
@@ -46,12 +48,41 @@ describe('POST /api/models/validate', () => {
     jest.clearAllMocks();
     process.env.FAL_AI_API_KEY = 'test-api-key';
     process.env.NEXT_PUBLIC_APP_URL = 'http://localhost:3000';
-    // Mock fetch to resolve successfully (fire-and-forget call)
+    (prisma.modelEndpoint.count as jest.Mock).mockResolvedValue(0);
     (global.fetch as jest.Mock).mockResolvedValue({
       ok: true,
       status: 200,
       statusText: 'OK',
     });
+  });
+
+  it('should return 429 when rate limit exceeded', async () => {
+    (prisma.modelEndpoint.count as jest.Mock).mockResolvedValue(3);
+
+    const request = new NextRequest('http://localhost/api/models/validate', {
+      method: 'POST',
+      body: JSON.stringify({ endpointId: 'fal-ai/flux/dev' }),
+    });
+
+    const response = await POST(request);
+    const data = await response.json();
+
+    expect(response.status).toBe(429);
+    expect(data.error).toContain('Rate limit exceeded');
+    expect(prisma.modelEndpoint.create).not.toHaveBeenCalled();
+  });
+
+  it('should return 401 when not authenticated', async () => {
+    (requireAuth as jest.Mock).mockResolvedValueOnce(null);
+
+    const request = new NextRequest('http://localhost/api/models/validate', {
+      method: 'POST',
+      body: JSON.stringify({ endpointId: 'fal-ai/flux/dev' }),
+    });
+
+    const response = await POST(request);
+
+    expect(response.status).toBe(401);
   });
 
   it('should return 400 for missing endpointId', async () => {
@@ -152,6 +183,7 @@ describe('POST /api/models/validate', () => {
           kind: 'model',
           modality: 'image',
           status: 'pending_research',
+          addedByUserId: 'user-id',
         }),
       })
     );
@@ -236,6 +268,7 @@ describe('POST /api/models/validate', () => {
           source: 'eachlabs',
           provider: 'eachlabs',
           status: 'pending_research',
+          addedByUserId: 'user-id',
         }),
       })
     );

@@ -1,26 +1,22 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { prisma } from '@/src/db/client';
-import { createFalAIClientFromEnv } from '@/src/providers/falai/helpers';
+import { createFalAIClientFromEnv, determineModalityFromCategory } from '@/src/providers/falai/helpers';
 import {
   findEachLabsModel,
   eachLabsDetailToFalMetadata,
 } from '@/src/providers/eachlabs/helpers';
 import { researchModelWithGemini } from '@/src/providers/gemini/helpers';
 import type { FalAIModelMetadata } from '@/src/providers/falai/types';
+import type { Modality } from '@/src/core/types';
+import type { ModelSpec, RequiredAssets } from '@/src/core/modelSpec';
 import { Prisma } from '@prisma/client';
 import { handleApiError } from '@/src/lib/api-helpers';
 import { updateResearchJobError } from '@/src/lib/research-helpers';
 import { requireAdmin, unauthorizedResponse } from '@/src/lib/auth';
 
 /**
- * Refresh research for a model (ADMIN only)
- * 
- * Flow:
- * 1. Create new ResearchJob (queued)
- * 2. Fetch model metadata from fal.ai
- * 3. Call Gemini to research and generate new ModelSpec
- * 4. Overwrite existing ModelSpec (or create new one)
- * 5. Update ResearchJob status
+ * Refresh research for a model (ADMIN only). Sprint 7: modality+required_assets derived from metadata;
+ * Gemini gives only prompt_guidelines + summary. No schema converters.
  */
 export async function POST(
   request: NextRequest,
@@ -60,6 +56,8 @@ export async function POST(
 
     try {
       let modelMetadata: FalAIModelMetadata;
+      let category: string | undefined;
+
       if (modelEndpoint.source === 'eachlabs') {
         const detail = await findEachLabsModel(modelEndpoint.endpointId);
         if (!detail) {
@@ -68,6 +66,7 @@ export async function POST(
           );
         }
         modelMetadata = eachLabsDetailToFalMetadata(detail);
+        category = detail.output_type;
       } else {
         const falClient = createFalAIClientFromEnv();
         const falMetadata = await falClient.findModel(modelEndpoint.endpointId);
@@ -77,16 +76,27 @@ export async function POST(
           );
         }
         modelMetadata = falMetadata;
+        category = falMetadata.metadata?.category;
       }
 
-      // Research model with Gemini
-      const modelSpec = await researchModelWithGemini(
+      const raw = determineModalityFromCategory(category) ?? modelEndpoint.modality?.toLowerCase() ?? 'text';
+      const modality: Modality = raw === 'video' ? 'text-to-video' : raw === 'image' ? 'text-to-image' : 'text-to-text';
+      const required_assets: RequiredAssets = 'none';
+
+      // Gemini: guidelines + summary only (never modality/required_assets/params)
+      const guidelines = await researchModelWithGemini(
         modelMetadata,
         modelEndpoint.kind as 'model' | 'workflow',
-        modelEndpoint.modality
+        modality
       );
 
-      // Convert to Prisma JsonValue
+      const modelSpec: ModelSpec = {
+        modality,
+        required_assets,
+        prompt_guidelines: guidelines.prompt_guidelines,
+        summary: guidelines.summary,
+      };
+
       const specJson: Prisma.InputJsonValue = JSON.parse(JSON.stringify(modelSpec));
 
       // Delete old specs and create new one (overwrite)

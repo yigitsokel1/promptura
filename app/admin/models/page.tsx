@@ -58,6 +58,8 @@ export default function AdminModelsPage() {
         return 'bg-red-100 text-red-800 dark:bg-red-900/20 dark:text-red-200';
       case 'pending_research':
         return 'bg-yellow-100 text-yellow-800 dark:bg-yellow-900/20 dark:text-yellow-200';
+      case 'research_failed':
+        return 'bg-red-100 text-red-800 dark:bg-red-900/20 dark:text-red-200';
       default:
         return 'bg-zinc-100 text-zinc-800 dark:bg-zinc-900/20 dark:text-zinc-200';
     }
@@ -98,6 +100,7 @@ export default function AdminModelsPage() {
             <option value="active">Active</option>
             <option value="disabled">Disabled</option>
             <option value="pending_research">Pending Research</option>
+            <option value="research_failed">Research Failed</option>
           </select>
           </div>
           {models.some((m) => m.status === 'pending_research' || m.researchJobs?.[0]?.status === 'queued' || m.researchJobs?.[0]?.status === 'running') && (
@@ -190,9 +193,9 @@ export default function AdminModelsPage() {
                         {researchDone && (
                           <span className="text-green-600 dark:text-green-400">✓ done</span>
                         )}
-                        {researchStatus === 'error' && (
-                          <span className="text-red-600 dark:text-red-400" title={latestJob?.error ?? ''}>
-                            ✗ error
+                        {(researchStatus === 'error' || model.status === 'research_failed') && (
+                          <span className="text-red-600 dark:text-red-400" title={latestJob?.error ?? 'Research failed'}>
+                            ✗ {model.status === 'research_failed' ? 'failed' : 'error'}
                           </span>
                         )}
                         {!latestJob && model.status === 'pending_research' && (

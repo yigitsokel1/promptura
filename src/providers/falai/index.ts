@@ -9,11 +9,11 @@ import type {
   PromptGenerationResult,
   RunCandidatesResult,
 } from '../types';
-import type { TaskSpec, ModelRef, CandidatePrompt, RunResult, RunOutput } from '@/src/core/types';
+import type { TaskSpec, ModelRef, CandidatePrompt, RunResult } from '@/src/core/types';
 import type { ModelSpec } from '@/src/core/modelSpec';
 import { FalAIClient } from './client';
 import type { FalAIConfig } from './types';
-import { buildFalAIPayload, convertFalAIOutputToRunOutput } from './helpers';
+import { buildFalAIPayload, convertFalAIOutputToOutputAssets } from './helpers';
 import { createRun, updateRun } from '@/src/db/queries';
 import { limitConcurrency } from '@/src/lib/concurrency';
 
@@ -90,7 +90,8 @@ export class FalAIAdapter implements ProviderAdapter {
       async (candidate) => {
         try {
           // Build payload from candidate and ModelSpec (with upload support)
-          const payload = await buildFalAIPayload(candidate, modelSpec, task.inputs, this.client);
+          const taskInputs = { ...task.inputs, assets: task.assets };
+          const payload = await buildFalAIPayload(candidate, modelSpec, taskInputs, this.client);
 
           // Submit job to queue
           const requestId = await this.client.submitQueueJob(
@@ -133,54 +134,28 @@ export class FalAIAdapter implements ProviderAdapter {
     // If submitOnly, return pending results (UI will poll)
     if (context?.submitOnly) {
       const results: RunResult[] = jobSubmissions.map((submission) => {
-        if (submission.error || !submission.requestId) {
-          // Return error result (already saved to DB)
-          return {
-            candidateId: submission.candidateId,
-            output: {
-              type: 'text',
-              text: `Error: ${submission.error || 'Failed to submit job'}`,
-            },
-            meta: {
-              latencyMs: Date.now() - startTime,
-            },
-          };
-        }
-
-        // Return pending result (UI will poll for status)
+        const text = submission.error || !submission.requestId
+          ? `Error: ${submission.error || 'Failed to submit job'}`
+          : '[Pending] Job submitted, waiting for completion...';
         return {
           candidateId: submission.candidateId,
-          output: {
-            type: 'text',
-            text: '[Pending] Job submitted, waiting for completion...',
-          },
-          meta: {
-            latencyMs: Date.now() - startTime,
-          },
+          assets: [{ type: 'text' as const, content: text }],
+          metadata: { latencyMs: Date.now() - startTime },
         };
       });
-
       return { results };
     }
 
-    // Poll for results (blocking - for testing/development only)
     const results: RunResult[] = await Promise.all(
       jobSubmissions.map(async (submission) => {
         if (submission.error || !submission.requestId) {
-          // Return error result (already saved to DB)
           return {
             candidateId: submission.candidateId,
-            output: {
-              type: 'text',
-              text: `Error: ${submission.error || 'Failed to submit job'}`,
-            },
-            meta: {
-              latencyMs: Date.now() - startTime,
-            },
+            assets: [{ type: 'text' as const, content: `Error: ${submission.error || 'Failed to submit job'}` }],
+            metadata: { latencyMs: Date.now() - startTime },
           };
         }
 
-        // Poll until job completes
         const result = await this.pollJobResult(
           targetModel.modelId,
           submission.requestId,
@@ -192,8 +167,8 @@ export class FalAIAdapter implements ProviderAdapter {
 
         return {
           candidateId: submission.candidateId,
-          output: result.output,
-          meta: result.meta,
+          assets: result.assets,
+          metadata: result.metadata,
         };
       })
     );
@@ -214,7 +189,7 @@ export class FalAIAdapter implements ProviderAdapter {
     startTime: number,
     maxWaitTime = 300000, // 5 minutes max
     pollInterval = 2000 // 2 seconds between polls
-  ): Promise<{ output: RunOutput; meta: { latencyMs: number; raw?: unknown } }> {
+  ): Promise<{ assets: import('@/src/core/types').OutputAsset[]; metadata: { latencyMs: number; raw?: unknown } }> {
     const deadline = Date.now() + maxWaitTime;
 
     while (Date.now() < deadline) {
@@ -234,20 +209,18 @@ export class FalAIAdapter implements ProviderAdapter {
           throw new Error(`Job failed: ${result.error}`);
         }
 
-        // Convert fal.ai output to RunOutput based on ModelSpec
-        const output = convertFalAIOutputToRunOutput(result.output, modelSpec);
+        const assets = convertFalAIOutputToOutputAssets(result.output, modelSpec);
         const latencyMs = Date.now() - startTime;
 
-        // Update Run with success result
         await updateRun(iterationId, candidateId, {
           status: 'done',
-          outputJson: output,
+          outputJson: { assets },
           latencyMs,
         });
 
         return {
-          output,
-          meta: {
+          assets,
+          metadata: {
             latencyMs,
             raw: result.output,
           },

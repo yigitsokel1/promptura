@@ -6,7 +6,7 @@
 import { Prisma } from '@prisma/client';
 import { prisma } from './client';
 import type { ModelEndpointWithRelations, Run } from './types';
-import type { RunOutput } from '@/src/core/types';
+import type { OutputAsset } from '@/src/core/types';
 
 /**
  * Common include pattern for ModelEndpoint with latest spec and jobs
@@ -123,7 +123,7 @@ export async function updateRun(
   data: {
     status?: 'queued' | 'running' | 'done' | 'error';
     falRequestId?: string;
-    outputJson?: RunOutput;
+    outputJson?: { assets: OutputAsset[] } | Record<string, unknown>;
     latencyMs?: number;
     error?: string;
     finishedAt?: Date;
@@ -207,6 +207,7 @@ export async function createIterationRecord(data: {
   id: string;
   modelEndpointId?: string;
   userId?: string;
+  taskJson?: object;
 }): Promise<void> {
   await prisma.iteration.upsert({
     where: { id: data.id },
@@ -214,8 +215,28 @@ export async function createIterationRecord(data: {
       id: data.id,
       modelEndpointId: data.modelEndpointId ?? null,
       userId: data.userId ?? null,
+      taskJson: data.taskJson ?? undefined,
     },
     update: {},
+  });
+}
+
+export async function updateIterationWithCandidates(
+  iterationId: string,
+  candidates: Array<{ id: string; prompt: string; generator: string }>
+): Promise<void> {
+  await prisma.iteration.updateMany({
+    where: { id: iterationId },
+    data: {
+      candidatesJson: candidates as unknown as Prisma.InputJsonValue,
+    },
+  });
+}
+
+export async function updateIterationError(iterationId: string, errorMessage: string): Promise<void> {
+  await prisma.iteration.updateMany({
+    where: { id: iterationId },
+    data: { errorMessage },
   });
 }
 

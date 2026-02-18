@@ -9,9 +9,11 @@ import type {
   ExecutionResult,
   TaskInputs,
 } from './types';
-import type { CandidatePrompt, RunOutput } from '@/src/core/types';
+import type { CandidatePrompt, OutputAsset } from '@/src/core/types';
 import type { ModelSpec } from '@/src/core/modelSpec';
-import { convertFalAIOutputToRunOutput } from '@/src/providers/falai/helpers';
+import { buildExecutionPayload } from '@/src/lib/execution-payload';
+import { taskInputsToAssets } from '@/src/lib/task-assets';
+import { convertFalAIOutputToOutputAssets } from '@/src/providers/falai/helpers';
 
 const EACHLABS_BASE = 'https://api.eachlabs.ai';
 const EACHLABS_PREDICTION_URL = `${EACHLABS_BASE}/v1/prediction`;
@@ -81,77 +83,6 @@ function formatEachLabsError(
   return `EachLabs API error: ${status} ${statusText}${hasDetail ? ` - ${trimmed}` : ''}`;
 }
 
-/**
- * Build EachLabs "input" object from candidate + modelSpec + taskInputs.
- * No file upload; image/video must be URLs (or base64 if API supports later).
- */
-function buildInput(
-  candidate: CandidatePrompt,
-  modelSpec: ModelSpec,
-  taskInputs?: TaskInputs
-): Record<string, unknown> {
-  const input: Record<string, unknown> = {};
-
-  for (const inputSpec of modelSpec.inputs) {
-    const name = inputSpec.name;
-    const type = (inputSpec.type || 'string').toLowerCase();
-
-    if (candidate.params && name in candidate.params) {
-      const v = candidate.params[name];
-      if (type === 'number' && typeof v === 'string') {
-        input[name] = parseFloat(v);
-      } else if (type === 'boolean' && typeof v === 'string') {
-        input[name] = v === 'true' || v === '1';
-      } else {
-        input[name] = v;
-      }
-      continue;
-    }
-
-    if (
-      name === 'prompt' ||
-      name === 'text' ||
-      name === 'message' ||
-      type === 'string'
-    ) {
-      input[name] = candidate.prompt;
-      continue;
-    }
-
-    if (
-      type === 'image' ||
-      name.toLowerCase().includes('image')
-    ) {
-      const data = candidate.inputAssets?.image || taskInputs?.image;
-      if (data) input[name] = data;
-      else if (inputSpec.required) {
-        throw new Error(`Required image input '${name}' is missing`);
-      }
-      continue;
-    }
-
-    if (
-      type === 'video' ||
-      name.toLowerCase().includes('video')
-    ) {
-      const data = candidate.inputAssets?.video || taskInputs?.video;
-      if (data) input[name] = data;
-      else if (inputSpec.required) {
-        throw new Error(`Required video input '${name}' is missing`);
-      }
-      continue;
-    }
-
-    if (inputSpec.required && inputSpec.default !== undefined) {
-      input[name] = inputSpec.default;
-    } else if (inputSpec.required) {
-      throw new Error(`Required input '${name}' is missing`);
-    }
-  }
-
-  return input;
-}
-
 export class EachLabsExecutionProvider implements ExecutionProvider {
   constructor(private apiKey: string) {}
 
@@ -160,7 +91,13 @@ export class EachLabsExecutionProvider implements ExecutionProvider {
     modelSpec: ModelSpec,
     taskInputs?: TaskInputs
   ): Promise<Record<string, unknown>> {
-    return buildInput(candidate, modelSpec, taskInputs);
+    const taskAssets = taskInputsToAssets(taskInputs);
+    return buildExecutionPayload({
+      modelSpec,
+      prompt: candidate.prompt,
+      taskAssets,
+      inputAssets: candidate.inputAssets,
+    });
   }
 
   async submit(endpointId: string, payload: Record<string, unknown>): Promise<string> {
@@ -225,8 +162,8 @@ export class EachLabsExecutionProvider implements ExecutionProvider {
     };
   }
 
-  convertToRunOutput(rawOutput: unknown, modelSpec: ModelSpec): RunOutput {
-    return convertFalAIOutputToRunOutput(rawOutput, modelSpec);
+  convertToOutputAssets(rawOutput: unknown, modelSpec: ModelSpec): OutputAsset[] {
+    return convertFalAIOutputToOutputAssets(rawOutput, modelSpec);
   }
 
   private async fetchPrediction(

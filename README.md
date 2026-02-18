@@ -4,9 +4,9 @@ A playground to iteratively discover the best prompt for a task.
 
 ---
 
-## How PromptAura works (Iteration Loop)
+## How Promptura works (Iteration Loop)
 
-PromptAura has **one flow**: task-based iteration. You describe what you want; the system generates and runs candidate prompts, then lets you refine from the best ones.
+Promptura has **one flow**: task-based iteration. You describe what you want; the system generates and runs candidate prompts, then lets you refine from the best ones.
 
 ### The loop (high level)
 
@@ -14,7 +14,7 @@ PromptAura has **one flow**: task-based iteration. You describe what you want; t
    Pick a model, write a **task goal** (e.g. “a cat in a hat, watercolor style”), and hit **Generate**. You never type a raw prompt.
 
 2. **System generates many candidates**  
-   Gemini creates **20 candidate prompts** from your goal and the model’s spec (guidelines, parameters). Each candidate is sent to the model (e.g. fal.ai); the UI polls until all runs finish.
+   Gemini creates **20 candidate prompts** from your goal and the model’s spec (guidelines, required assets). Each candidate is sent to the model (e.g. fal.ai); the UI polls until all runs finish.
 
 3. **You choose what worked**  
    You see prompts + outputs. You **select** the ones you like and optionally add **notes** (e.g. “lighter background”).
@@ -29,7 +29,7 @@ There is no “manual mode”: no typing a single prompt and running it once. Th
 
 - **Task-based** keeps you at the intent level; the system handles prompt wording and model parameters.
 - **Generate → select → refine** uses the model’s actual outputs and your feedback, so each round is informed by real results.
-- **Gemini** is the single prompt creator: it sees the ModelSpec (guidelines, inputs/outputs) and, on refine, the selected prompts, notes, and output summaries, so prompts stay consistent and on-spec.
+- **Gemini** is the single prompt creator: it sees the ModelSpec (modality, required assets, prompt guidelines) and, on refine, the selected prompts, notes, and output summaries, so prompts stay consistent and on-spec.
 
 ### Where things live
 
@@ -87,15 +87,14 @@ Models are discovered and validated through a multi-step process:
 
 1. **Validation**: Users can validate fal.ai model endpoints via the Playground. The system checks if the endpoint exists in fal.ai's API.
 2. **Research**: Once validated, a research job is automatically created. Gemini analyzes the model's metadata, documentation, and capabilities to generate a normalized `ModelSpec`.
-3. **Normalization**: The `ModelSpec` includes:
-   - Input parameters (name, type, required, min/max)
-   - Output format (type, format)
-   - Prompt guidelines
-   - Recommended parameter ranges
-   - Workflow steps (for workflows)
+3. **Normalization**: The `ModelSpec` is param-free and includes:
+   - **modality**: e.g. text-to-image, image-to-video, text-to-video
+   - **required_assets**: none | image | video | image+video
+   - **prompt_guidelines**: actionable tips for prompt writing
+   - **summary** (optional): how the model works
 4. **Activation**: Once research is complete, the model status changes to `active` and becomes available in the Playground.
 
-All model information is stored in the database, ensuring consistency and enabling spec-driven UI generation.
+All model information is stored in the database, ensuring consistency and enabling spec-driven UI. For why ModelSpec and execution have no parameters, see **[ADR-008: Param-Free ModelSpec](docs/adr/ADR-008-param-free-model-spec.md)**.
 
 ## How to Add a Model
 
@@ -116,19 +115,21 @@ Adding a new model to the catalog is straightforward:
 ### Flow Details
 
 ```
-User enters endpoint_id
+User enters endpoint_id (fal.ai or EachLabs)
     ↓
 /api/models/validate (POST)
     ↓
-fal.ai API: Model exists? → Yes/No
+Provider API: Model exists? → Yes/No
     ↓ (if Yes)
 DB: Create ModelEndpoint (status: pending_research)
     ↓
 DB: Create ResearchJob (status: queued)
     ↓
-Background: /api/research/process (auto-triggered)
+Background: runResearchJob (auto-triggered)
     ↓
-Gemini: Analyze model → Generate ModelSpec
+Research (Sprint 7 — param-free):
+  - Modality + required_assets derived from provider metadata (no schema parsing).
+  - Gemini produces only prompt_guidelines + summary (never params or asset requirements).
     ↓
 DB: Save ModelSpec
     ↓
@@ -136,6 +137,23 @@ DB: Update ModelEndpoint (status: active)
     ↓
 Model ready for use in Playground
 ```
+
+### Reset models (fresh start)
+
+To clear all models and start over:
+
+```bash
+npm run db:reset-models
+```
+
+Then re-add models via Playground or Admin. Recommended endpoints:
+
+| Provider | Modality | Endpoint ID |
+|----------|----------|-------------|
+| fal.ai | text-to-image | `fal-ai/flux/dev` |
+| fal.ai | image-to-image | `fal-ai/flux/dev/image-to-image` |
+| fal.ai | text-to-video | `fal-ai/minimax-video-01` |
+| eachlabs | image-to-video | `nano-banana-pro-edit` |
 
 ### Error Handling
 
@@ -155,7 +173,7 @@ Admins can also trigger research refresh for existing models:
 
 ### Why Gemini is the single prompt creator
 
-- **One reasoning engine**: Same system that researches models (and produces ModelSpec) also writes prompts. It sees the same guidelines, inputs/outputs, and parameter ranges, so prompts stay aligned with the spec.
+- **One reasoning engine**: Same system that researches models (and produces ModelSpec) also writes prompts. It sees the same modality, required assets, and guidelines, so prompts stay aligned with the spec. Execution uses minimal payload (prompt + assets only); no param forms in UI.
 - **Task → prompts**: You give a task goal; Gemini turns it into many concrete prompts (and, on refine, into better ones using your selections and output summaries). You never have to guess prompt wording or model-specific parameters.
 - **Refine quality**: Refine sends Gemini the selected prompts, your notes, and short summaries of what the model actually produced. That context is why refined prompts “evolve” instead of feeling random.
 - **Execution vs reasoning**: fal.ai (and similar) are built for running jobs (image/video generation, etc.), not for structured prompt authoring. Gemini handles authoring; the execution provider only runs the prompts we give it.

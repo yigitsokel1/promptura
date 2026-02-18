@@ -1,10 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
-import type {
-  TaskSpec,
-  ModelRef,
-  RunOutput,
-} from '@/src/core/types';
+import type { TaskSpec, ModelRef } from '@/src/core/types';
 import type { ModelSpec } from '@/src/core/modelSpec';
+import { modelSpecNeedsImage, modelSpecNeedsVideo } from '@/src/core/modelSpec';
 import { createIteration, addCandidates } from '@/src/core/iteration/iteration';
 import { generateIterationId } from '@/src/core/iteration/id-generator';
 import { getProviderAdapter, getPromptGenerationAdapter } from '@/src/providers';
@@ -59,7 +56,7 @@ export async function POST(request: NextRequest) {
       bodySelectedPrompts,
       previousRuns.map((r) => ({
         candidateId: r.candidateId,
-        outputJson: r.outputJson as RunOutput | null | undefined,
+        outputJson: r.outputJson,
       }))
     );
 
@@ -82,6 +79,21 @@ export async function POST(request: NextRequest) {
       );
     }
     const modelSpec = latestSpec.specJson as ModelSpec;
+
+    // Sprint 7: fail fast when required asset is missing
+    const taskAssets = task.assets ?? [];
+    if (modelSpecNeedsImage(modelSpec) && !taskAssets.some((a) => a.type === 'image')) {
+      return NextResponse.json(
+        { error: 'Image required.', code: 'AssetRequired', required: 'image' },
+        { status: 400 }
+      );
+    }
+    if (modelSpecNeedsVideo(modelSpec) && !taskAssets.some((a) => a.type === 'video')) {
+      return NextResponse.json(
+        { error: 'Video required.', code: 'AssetRequired', required: 'video' },
+        { status: 400 }
+      );
+    }
 
     // Build ModelRef from ModelEndpoint (Blok C: use provider for execution)
     const targetModel: ModelRef = {

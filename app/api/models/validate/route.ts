@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import {
   createFalAIClientFromEnv,
   extractModelMetadata,
+  validateFalModelViaSchema,
 } from '@/src/providers/falai/helpers';
 import {
   findEachLabsModel,
@@ -10,7 +11,7 @@ import {
 import { prisma } from '@/src/db/client';
 import { handleApiError } from '@/src/lib/api-helpers';
 import { runResearchJob } from '@/src/lib/research-helpers';
-import { requireAdmin, unauthorizedResponse } from '@/src/lib/auth';
+import { requireAuth, unauthorizedResponse } from '@/src/lib/auth';
 
 type SourceSlug = 'fal.ai' | 'eachlabs';
 
@@ -21,6 +22,7 @@ interface ValidateRequest {
 
 /**
  * Validate a model endpoint (fal.ai or EachLabs).
+ * Any authenticated user can add models. If model exists in provider, it is added to catalog.
  *
  * Flow:
  * 1. Resolve source (default fal.ai)
@@ -28,10 +30,37 @@ interface ValidateRequest {
  * 3. If NOT FOUND → return error
  * 4. If FOUND: create ModelEndpoint (pending_research), start ResearchJob
  */
+const RATE_LIMIT_PER_MINUTE = 3;
+
 export async function POST(request: NextRequest) {
-  const admin = await requireAdmin();
-  if (!admin) return unauthorizedResponse();
+  const session = await requireAuth();
+  if (!session) return unauthorizedResponse();
   try {
+    const userId = session.user?.id;
+    if (!userId) {
+      return NextResponse.json(
+        { error: 'User ID not found in session' },
+        { status: 401 }
+      );
+    }
+
+    // Per-user rate limit: max 3 model additions per minute
+    const oneMinuteAgo = new Date(Date.now() - 60_000);
+    const recentCount = await prisma.modelEndpoint.count({
+      where: {
+        addedByUserId: userId,
+        createdAt: { gte: oneMinuteAgo },
+      },
+    });
+    if (recentCount >= RATE_LIMIT_PER_MINUTE) {
+      return NextResponse.json(
+        {
+          error: `Rate limit exceeded: max ${RATE_LIMIT_PER_MINUTE} model additions per minute. Try again later.`,
+        },
+        { status: 429 }
+      );
+    }
+
     const body: ValidateRequest = await request.json();
 
     if (!body.endpointId || typeof body.endpointId !== 'string') {
@@ -58,9 +87,9 @@ export async function POST(request: NextRequest) {
       });
     }
 
-    let kind: 'model' | 'workflow';
-    let modality: 'text' | 'image' | 'video';
-    let provider: string;
+    let kind: 'model' | 'workflow' = 'model';
+    let modality: 'text' | 'image' | 'video' = 'text';
+    let provider: string = source === 'eachlabs' ? 'eachlabs' : 'falai';
 
     if (source === 'eachlabs') {
       const detail = await findEachLabsModel(endpointId);
@@ -74,18 +103,42 @@ export async function POST(request: NextRequest) {
       modality = eachLabsModality(detail);
       provider = 'eachlabs';
     } else {
-      const client = createFalAIClientFromEnv();
-      const modelMetadata = await client.findModel(endpointId);
-      if (!modelMetadata) {
+      let modelMetadata: { endpoint_id: string; metadata: { category?: string } } | null = null;
+      let usedSchemaFallback = false;
+      try {
+        const client = createFalAIClientFromEnv();
+        modelMetadata = await client.findModel(endpointId);
+      } catch (findError) {
+        const errMsg = findError instanceof Error ? findError.message : String(findError);
+        const is5xx = /5\d\d/.test(errMsg) || errMsg.includes('500') || errMsg.includes('504');
+        if (is5xx) {
+          const schemaResult = await validateFalModelViaSchema(endpointId);
+          if (schemaResult.valid && schemaResult.kind && schemaResult.modality) {
+            kind = schemaResult.kind;
+            modality = schemaResult.modality;
+            provider = 'falai';
+            usedSchemaFallback = true;
+          } else {
+            return NextResponse.json(
+              { error: `Fal.ai API is temporarily unavailable (${errMsg.slice(0, 80)}...). Could not validate model. Try again later.` },
+              { status: 502 }
+            );
+          }
+        } else {
+          throw findError;
+        }
+      }
+      if (modelMetadata) {
+        const extracted = extractModelMetadata(modelMetadata);
+        kind = extracted.kind;
+        modality = extracted.modality;
+        provider = 'falai';
+      } else if (!usedSchemaFallback) {
         return NextResponse.json(
           { error: `Model endpoint not found: ${endpointId}` },
           { status: 404 }
         );
       }
-      const extracted = extractModelMetadata(modelMetadata);
-      kind = extracted.kind;
-      modality = extracted.modality;
-      provider = 'falai';
     }
 
     const modelEndpoint = await prisma.modelEndpoint.create({
@@ -96,6 +149,7 @@ export async function POST(request: NextRequest) {
         status: 'pending_research',
         source,
         provider,
+        addedByUserId: userId,
         lastCheckedAt: new Date(),
       },
     });

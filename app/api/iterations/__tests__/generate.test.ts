@@ -9,6 +9,16 @@ import type { TaskSpec } from '@/src/core/types';
 import { prisma } from '@/src/db/client';
 
 // Blok B: mock auth and provider keys so we don't pull in next-auth (ESM)
+jest.mock('next/server', () => {
+  const actual = jest.requireActual<typeof import('next/server')>('next/server');
+  return {
+    ...actual,
+    after: (fn: () => void | Promise<unknown>) => {
+      void fn(); // fire and forget, same as real after()
+    },
+  };
+});
+
 jest.mock('@/src/lib/auth', () => ({
   requireAuth: jest.fn(() =>
     Promise.resolve({
@@ -25,37 +35,36 @@ jest.mock('@/src/lib/provider-keys', () => ({
     mockRequireUserProviderKey(userId, provider),
 }));
 
+// Shared mock adapter so tests can assert on runCandidates (Blok G)
+const mockRunCandidates = jest.fn(async (task: TaskSpec, _model: unknown, candidates: unknown[], context: { submitOnly?: boolean }) => {
+  if (context?.submitOnly) return { results: [] };
+  return {
+    results: (candidates as { id: string; prompt: string }[]).map((c) => ({
+      candidateId: c.id,
+      assets:
+        task.modality === 'text-to-text'
+          ? [{ type: 'text' as const, content: `Mock output for: ${c.prompt}` }]
+          : task.modality === 'text-to-image' || task.modality === 'image-to-image'
+            ? [{ type: 'image' as const, url: 'https://mock.image.png' }]
+            : task.modality === 'text-to-video' || task.modality === 'image-to-video' || task.modality === 'video-to-video'
+              ? [{ type: 'video' as const, url: 'https://mock.video.mp4' }]
+              : [{ type: 'text' as const, content: `Mock output for: ${c.prompt}` }],
+      metadata: { latencyMs: 100 },
+    })),
+  };
+});
+
 // Mock the provider module
 jest.mock('@/src/providers', () => ({
   getProviderAdapter: jest.fn(() => ({
-    generateCandidates: jest.fn(async (task, model, count) => ({
+    generateCandidates: jest.fn(async (task: TaskSpec, model: unknown, count: number) => ({
       candidates: Array.from({ length: count }, (_, i) => ({
         id: `mock_candidate_${i}`,
         prompt: `Mock prompt ${i + 1} for: ${task.goal}`,
         generator: 'self' as const,
       })),
     })),
-    runCandidates: jest.fn(async (task, _model, candidates, context) => {
-      // Sprint 3: When submitOnly is true, return empty results (jobs submitted, UI will poll)
-      if (context?.submitOnly) {
-        return { results: [] };
-      }
-      // Otherwise return mock results (for backward compatibility)
-      return {
-        results: candidates.map((candidate: { id: string; prompt: string }) => ({
-          candidateId: candidate.id,
-          output:
-            task.modality === 'text-to-text'
-              ? { type: 'text' as const, text: `Mock output for: ${candidate.prompt}` }
-              : task.modality === 'text-to-image' || task.modality === 'image-to-image'
-                ? { type: 'image' as const, images: [{ url: 'https://mock.image.png' }] }
-                : task.modality === 'text-to-video' || task.modality === 'image-to-video' || task.modality === 'video-to-video'
-                  ? { type: 'video' as const, videos: [{ url: 'https://mock.video.mp4' }] }
-                  : { type: 'text' as const, text: `Mock output for: ${candidate.prompt}` },
-          meta: { latencyMs: 100 },
-        })),
-      };
-    }),
+    runCandidates: mockRunCandidates,
   })),
   getPromptGenerationAdapter: jest.fn(() => ({
     generateCandidates: jest.fn(async (task, _model, count, context) => {
@@ -74,15 +83,15 @@ jest.mock('@/src/providers', () => ({
     runCandidates: jest.fn(async (task, _model, candidates) => ({
       results: candidates.map((candidate: { id: string; prompt: string }) => ({
         candidateId: candidate.id,
-        output:
+        assets:
           task.modality === 'text-to-text'
-            ? { type: 'text' as const, text: `Mock output for: ${candidate.prompt}` }
+            ? [{ type: 'text' as const, content: `Mock output for: ${candidate.prompt}` }]
             : task.modality === 'text-to-image' || task.modality === 'image-to-image'
-              ? { type: 'image' as const, images: [{ url: 'https://mock.image.png' }] }
+              ? [{ type: 'image' as const, url: 'https://mock.image.png' }]
               : task.modality === 'text-to-video' || task.modality === 'image-to-video' || task.modality === 'video-to-video'
-                ? { type: 'video' as const, videos: [{ url: 'https://mock.video.mp4' }] }
-                : { type: 'text' as const, text: `Mock output for: ${candidate.prompt}` },
-        meta: { latencyMs: 100 },
+                ? [{ type: 'video' as const, url: 'https://mock.video.mp4' }]
+                : [{ type: 'text' as const, content: `Mock output for: ${candidate.prompt}` }],
+        metadata: { latencyMs: 100 },
       })),
     })),
   })),
@@ -91,11 +100,11 @@ jest.mock('@/src/providers', () => ({
 // Mock prisma (Blok B: iteration.upsert for createIterationRecord)
 jest.mock('@/src/db/client', () => ({
   prisma: {
-    modelEndpoint: {
-      findUnique: jest.fn(),
-    },
+    modelEndpoint: { findUnique: jest.fn() },
     iteration: {
       upsert: jest.fn(() => Promise.resolve()),
+      updateMany: jest.fn(() => Promise.resolve()),
+      findUnique: jest.fn(),
     },
   },
 }));
@@ -117,7 +126,7 @@ describe('POST /api/iterations/generate', () => {
     process.env = origEnv;
   });
 
-  it('Integration: user key var → run works (200, jobs submitted)', async () => {
+  it('Integration: user key var → returns 202, runs in background', async () => {
     const mockModelEndpoint = {
       id: 'model-endpoint-id-123',
       endpointId: 'fal-ai/flux/dev',
@@ -129,7 +138,7 @@ describe('POST /api/iterations/generate', () => {
       modelSpecs: [
         {
           id: 'spec-id-123',
-          specJson: { inputs: [], outputs: { type: 'image' } },
+          specJson: { modality: 'text-to-image', required_assets: 'none', prompt_guidelines: [] },
           researchedAt: new Date(),
         },
       ],
@@ -151,28 +160,56 @@ describe('POST /api/iterations/generate', () => {
     });
 
     const response = await POST(request);
-    expect(response.status).toBe(200);
+    expect(response.status).toBe(202);
 
     const iteration = await response.json();
 
-    // Verify iteration structure
     expect(iteration).toHaveProperty('id');
     expect(iteration).toHaveProperty('task');
     expect(iteration).toHaveProperty('targetModel');
-    expect(iteration.candidates).toHaveLength(20);
-    
-    // Sprint 3: API returns immediately with pending status (async queue pattern)
-    expect(iteration.status).toBe('pending');
-    // Results are not returned immediately - they come via polling /api/iterations/[id]/status
-    expect(iteration.results).toHaveLength(0);
-    // User had provider key → generate succeeded and run submitted
+    expect(iteration.status).toBe('generating');
+    expect(iteration.candidates).toEqual([]);
+    // Background runs Gemini + fal.ai; wait and assert 20 prompts → 20 runs (mock)
+    await new Promise((r) => setTimeout(r, 500));
+    expect(mockRunCandidates).toHaveBeenCalled();
+    const [, , candidates] = mockRunCandidates.mock.calls[mockRunCandidates.mock.calls.length - 1];
+    expect(candidates).toHaveLength(20);
+  });
 
-    // Verify candidates structure
-    iteration.candidates.forEach((candidate: { id: string; prompt: string; generator: string }) => {
-      expect(candidate).toHaveProperty('id');
-      expect(candidate).toHaveProperty('prompt');
-      expect(candidate.generator).toBe('gemini-fallback'); // Sprint 3: Gemini-only
+  it('returns 400 when model requires image but task has no image asset', async () => {
+    const imageRequiredEndpoint = {
+      id: 'model-endpoint-id-123',
+      endpointId: 'fal-ai/flux/dev',
+      kind: 'model',
+      modality: 'image',
+      status: 'active',
+      source: 'fal.ai',
+      provider: 'falai',
+      modelSpecs: [
+        {
+          id: 'spec-id-123',
+          specJson: { modality: 'image-to-image', required_assets: 'image', prompt_guidelines: [] },
+          researchedAt: new Date(),
+        },
+      ],
+    };
+    (prisma.modelEndpoint.findUnique as jest.Mock).mockResolvedValue(imageRequiredEndpoint);
+
+    const request = new NextRequest('http://localhost/api/iterations/generate', {
+      method: 'POST',
+      body: JSON.stringify({
+        task: { goal: 'Style transfer', modality: 'image-to-image' },
+        modelEndpointId: 'model-endpoint-id-123',
+      }),
+      headers: { 'Content-Type': 'application/json' },
     });
+
+    const response = await POST(request);
+    expect(response.status).toBe(400);
+    const data = await response.json();
+    expect(data.error).toBe('Image required.');
+    expect(data.code).toBe('AssetRequired');
+    expect(data.required).toBe('image');
   });
 
   it('should return 404 for non-existent model endpoint', async () => {
@@ -245,7 +282,7 @@ describe('POST /api/iterations/generate', () => {
       modelSpecs: [
         {
           id: 'spec-id-123',
-          specJson: { inputs: [], outputs: { type: 'image' } },
+          specJson: { modality: 'text-to-image', required_assets: 'none', prompt_guidelines: [] },
           researchedAt: new Date(),
         },
       ],
@@ -287,7 +324,7 @@ describe('POST /api/iterations/generate', () => {
       modelSpecs: [
         {
           id: 'spec-id-123',
-          specJson: { inputs: [], outputs: { type: 'image' } },
+          specJson: { modality: 'text-to-image', required_assets: 'none', prompt_guidelines: [] },
           researchedAt: new Date(),
         },
       ],
@@ -340,5 +377,111 @@ describe('POST /api/iterations/generate', () => {
 
     const error = await response.json();
     expect(error.error).toContain('Missing required fields');
+  });
+
+  describe('Blok G: image-to-image integration mock', () => {
+    const mockModelEndpoint = {
+      id: 'model-endpoint-id-img2img',
+      endpointId: 'fal-ai/flux/dev',
+      kind: 'model',
+      modality: 'image',
+      status: 'active',
+      source: 'fal.ai',
+      provider: 'falai',
+      modelSpecs: [
+        {
+          id: 'spec-img2img',
+          specJson: {
+            modality: 'image-to-image',
+            required_assets: 'image',
+            prompt_guidelines: [],
+          },
+          researchedAt: new Date(),
+        },
+      ],
+    };
+
+    it('passes task.assets to runCandidates for image-to-image', async () => {
+      (prisma.modelEndpoint.findUnique as jest.Mock).mockResolvedValue(mockModelEndpoint);
+
+      const task: TaskSpec = {
+        goal: 'Watercolor style transfer',
+        modality: 'image-to-image',
+        assets: [{ type: 'image', url: 'https://example.com/source.png' }],
+      };
+
+      const request = new NextRequest('http://localhost/api/iterations/generate', {
+        method: 'POST',
+        body: JSON.stringify({ task, modelEndpointId: 'model-endpoint-id-img2img' }),
+        headers: { 'Content-Type': 'application/json' },
+      });
+
+      const response = await POST(request);
+      expect(response.status).toBe(202);
+
+      // Background runs async; wait for mockRunCandidates to be invoked
+      await new Promise((r) => setTimeout(r, 500));
+      expect(mockRunCandidates).toHaveBeenCalled();
+      const [passedTask] = mockRunCandidates.mock.calls[mockRunCandidates.mock.calls.length - 1];
+      expect(passedTask.modality).toBe('image-to-image');
+      expect(passedTask.assets).toHaveLength(1);
+      expect(passedTask.assets?.[0]).toEqual({
+        type: 'image',
+        url: 'https://example.com/source.png',
+      });
+    });
+  });
+
+  describe('Blok G: image-to-video integration mock', () => {
+    const mockModelEndpoint = {
+      id: 'model-endpoint-id-img2vid',
+      endpointId: 'eachlabs/kling-video',
+      kind: 'model',
+      modality: 'video',
+      status: 'active',
+      source: 'eachlabs',
+      provider: 'eachlabs',
+      modelSpecs: [
+        {
+          id: 'spec-img2vid',
+          specJson: {
+            modality: 'image-to-video',
+            required_assets: 'image',
+            prompt_guidelines: [],
+          },
+          researchedAt: new Date(),
+        },
+      ],
+    };
+
+    it('passes task.assets to runCandidates for image-to-video', async () => {
+      (prisma.modelEndpoint.findUnique as jest.Mock).mockResolvedValue(mockModelEndpoint);
+      mockRequireUserProviderKey.mockResolvedValue('mock-eachlabs-key');
+
+      const task: TaskSpec = {
+        goal: 'Animate with smooth motion',
+        modality: 'image-to-video',
+        assets: [{ type: 'image', url: 'https://example.com/keyframe.png' }],
+      };
+
+      const request = new NextRequest('http://localhost/api/iterations/generate', {
+        method: 'POST',
+        body: JSON.stringify({ task, modelEndpointId: 'model-endpoint-id-img2vid' }),
+        headers: { 'Content-Type': 'application/json' },
+      });
+
+      const response = await POST(request);
+      expect(response.status).toBe(202);
+
+      await new Promise((r) => setTimeout(r, 500));
+      expect(mockRunCandidates).toHaveBeenCalled();
+      const [passedTask] = mockRunCandidates.mock.calls[mockRunCandidates.mock.calls.length - 1];
+      expect(passedTask.modality).toBe('image-to-video');
+      expect(passedTask.assets).toHaveLength(1);
+      expect(passedTask.assets?.[0]).toEqual({
+        type: 'image',
+        url: 'https://example.com/keyframe.png',
+      });
+    });
   });
 });

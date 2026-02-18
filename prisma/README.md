@@ -7,7 +7,7 @@ This project uses Prisma with PostgreSQL.
 1. Create a PostgreSQL database
 2. Set `DATABASE_URL` in your `.env` file:
    ```
-   DATABASE_URL="postgresql://user:password@localhost:5432/promptaura?schema=public"
+   DATABASE_URL="postgresql://user:password@localhost:5432/promptura?schema=public"
    ```
 
 3. Generate Prisma Client:

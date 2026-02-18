@@ -7,8 +7,8 @@ import type { FalAIQueueStatus } from '@/src/providers/falai/types';
 import type { CandidatePrompt } from '@/src/core/types';
 import type { ModelSpec } from '@/src/core/modelSpec';
 import { FalAIClient } from '@/src/providers/falai/client';
-import { buildFalAIPayload, convertFalAIOutputToRunOutput } from '@/src/providers/falai/helpers';
-import type { RunOutput } from '@/src/core/types';
+import { buildFalAIPayload, convertFalAIOutputToOutputAssets } from '@/src/providers/falai/helpers';
+import type { OutputAsset } from '@/src/core/types';
 
 const STATUS_MAP: Record<FalAIQueueStatus, 'queued' | 'running' | 'completed' | 'failed'> = {
   IN_QUEUE: 'queued',
@@ -50,7 +50,7 @@ export class FalAIExecutionProvider implements ExecutionProvider {
     };
   }
 
-  convertToRunOutput(rawOutput: unknown, modelSpec: ModelSpec): RunOutput {
-    return convertFalAIOutputToRunOutput(rawOutput, modelSpec);
+  convertToOutputAssets(rawOutput: unknown, modelSpec: ModelSpec): OutputAsset[] {
+    return convertFalAIOutputToOutputAssets(rawOutput, modelSpec);
   }
 }

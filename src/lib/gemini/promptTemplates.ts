@@ -3,27 +3,42 @@
  * Sprint 4: Quality focus — longer, scene-descriptive prompts; refine that truly evolves.
  */
 
-import type { TaskSpec, RunOutput } from '@/src/core/types';
+import type { TaskSpec, OutputAsset } from '@/src/core/types';
 import type { ModelSpec } from '@/src/core/modelSpec';
+import { modelSpecNeedsImage, modelSpecNeedsVideo, modelSpecOutputType } from '@/src/core/modelSpec';
 
-/** Turn run output into a short summary for Gemini (no raw JSON). */
-export function summarizeRunOutput(output: RunOutput | null | undefined): string {
+/** Turn run output (OutputAsset[] or legacy RunOutput) into a short summary for Gemini. */
+export function summarizeRunOutput(
+  output: OutputAsset[] | { type: string; text?: string; images?: { url: string }[]; videos?: { url: string }[] } | null | undefined
+): string {
   if (!output) return 'No output';
-  switch (output.type) {
-    case 'text':
-      if (!output.text?.trim()) return 'Empty text output';
-      const text = output.text.trim();
+  if (Array.isArray(output)) {
+    if (output.length === 0) return 'No output';
+    const texts = output.filter((a): a is OutputAsset & { type: 'text' } => a.type === 'text');
+    const images = output.filter((a): a is OutputAsset & { type: 'image' } => a.type === 'image');
+    const videos = output.filter((a): a is OutputAsset & { type: 'video' } => a.type === 'video');
+    if (texts.length > 0) {
+      const text = texts.map((t) => t.content).join(' ').trim();
+      if (!text) return 'Empty text output';
       const maxLen = 280;
       return text.length <= maxLen ? text : text.slice(0, maxLen) + '…';
-    case 'image':
-      const n = output.images?.length ?? 0;
-      return n === 1 ? 'Generated 1 image' : `Generated ${n} images`;
-    case 'video':
-      const v = output.videos?.length ?? 0;
-      return v === 1 ? 'Generated 1 video' : `Generated ${v} videos`;
-    default:
-      return 'Output received';
+    }
+    if (images.length > 0) return images.length === 1 ? 'Generated 1 image' : `Generated ${images.length} images`;
+    if (videos.length > 0) return videos.length === 1 ? 'Generated 1 video' : `Generated ${videos.length} videos`;
+    return 'Output received';
   }
+  const legacy = output as { type: string; text?: string; images?: { url: string }[]; videos?: { url: string }[] };
+  if (legacy.type === 'text' && legacy.text?.trim()) {
+    const text = legacy.text.trim();
+    return text.length <= 280 ? text : text.slice(0, 280) + '…';
+  }
+  if (legacy.type === 'image' && legacy.images?.length) {
+    return legacy.images.length === 1 ? 'Generated 1 image' : `Generated ${legacy.images.length} images`;
+  }
+  if (legacy.type === 'video' && legacy.videos?.length) {
+    return legacy.videos.length === 1 ? 'Generated 1 video' : `Generated ${legacy.videos.length} videos`;
+  }
+  return 'Output received';
 }
 
 /** One prompt item in Gemini's response. reasoning + tags drive quality and future UX. */
@@ -31,7 +46,6 @@ export interface GeminiPromptItem {
   prompt: string;
   reasoning: string;
   tags: string[];
-  params?: Record<string, unknown>;
   inputAssets?: Record<string, string>;
 }
 
@@ -40,27 +54,15 @@ export interface GeminiPromptsResponse {
   prompts: GeminiPromptItem[];
 }
 
-function formatInputs(modelSpec: ModelSpec): string {
-  return modelSpec.inputs
-    .map((input) => {
-      let line = `- ${input.name} (${input.type}${input.required ? ', required' : ', optional'})`;
-      if (input.min !== undefined || input.max !== undefined) {
-        line += ` [range: ${input.min ?? 'any'} to ${input.max ?? 'any'}]`;
-      }
-      if (input.enum?.length) {
-        line += ` [Allowed values ONLY: ${input.enum.map((v) => `'${v}'`).join(', ')}]`;
-      }
-      if (input.description) line += `: ${input.description}`;
-      return line;
-    })
-    .join('\n');
-}
-
-function formatRecommendedRanges(modelSpec: ModelSpec): string {
-  if (!modelSpec.recommended_ranges) return 'None specified';
-  return Object.entries(modelSpec.recommended_ranges)
-    .map(([param, [min, max]]) => `- ${param}: ${min} to ${max}`)
-    .join('\n');
+/** Only prompt-relevant context: whether image/video input is needed (from required_assets). */
+function formatPromptContext(modelSpec: ModelSpec): string {
+  const needsImage = modelSpecNeedsImage(modelSpec);
+  const needsVideo = modelSpecNeedsVideo(modelSpec);
+  const parts: string[] = [];
+  if (needsImage) parts.push('Requires image input (user will provide)');
+  if (needsVideo) parts.push('Requires video input (user will provide)');
+  if (parts.length === 0) return 'Text-only prompt input';
+  return parts.join('. ');
 }
 
 function formatGuidelines(modelSpec: ModelSpec): string {
@@ -78,11 +80,10 @@ export function generatePrompts(
   modelSpec: ModelSpec,
   count: number
 ): string {
-  const inputsDescription = formatInputs(modelSpec);
-  const recommendedRangesText = formatRecommendedRanges(modelSpec);
+  const promptContext = formatPromptContext(modelSpec);
   const guidelinesText = formatGuidelines(modelSpec);
-  const outputType = modelSpec.outputs.type;
-  const outputFormat = modelSpec.outputs.format;
+  const outputType = modelSpecOutputType(modelSpec);
+  const outputFormat = outputType === 'image' || outputType === 'video' ? 'url[]' : 'string';
 
   return `You are an expert prompt engineer. Generate exactly ${count} diverse, high-quality candidate prompts for the following task.
 
@@ -92,18 +93,14 @@ export function generatePrompts(
 
 CRITICAL: All prompts must be written in English. If the task goal is in another language, translate the intent to English and write the prompts in English.
 
-## Model context
+## Model context (prompt writing only — no params)
 ${modelSpec.summary ? `Summary: ${modelSpec.summary}\n` : ''}
-Inputs:
-${inputsDescription}
-
-Recommended parameter ranges:
-${recommendedRangesText}
+Input: ${promptContext}
 
 Prompt writing guidelines (follow strictly):
 ${guidelinesText}
 
-Output: ${outputType}, format: ${outputFormat}${modelSpec.outputs.description ? ` — ${modelSpec.outputs.description}` : ''}
+Output: ${outputType}, format: ${outputFormat}
 
 ## Your job
 1. Write LONG, SCENE-DESCRIPTIVE prompts. Each prompt should describe the scene, mood, composition, lighting, style, and any motion or detail that matters for the output. Short one-liners are not acceptable unless the model explicitly favors them.
@@ -111,7 +108,7 @@ Output: ${outputType}, format: ${outputFormat}${modelSpec.outputs.description ? 
 3. For each prompt you must also provide:
    - reasoning: 1–2 sentences on why this prompt is strong (e.g. clarity, specificity, alignment with guidelines).
    - tags: 3–6 short tags such as style, motion, lighting, composition, mood, subject (lowercase, English).
-4. Optionally include params (e.g. steps, cfg_scale) and inputAssets only when the model needs them; use recommended ranges for numeric params and only allowed enum values for string params.
+4. Output ONLY the prompt text. No parameters, no JSON keys — just the prompt string in the "prompt" field.
 
 ## Required JSON shape (return ONLY this, no markdown/code fences)
 {
@@ -120,7 +117,6 @@ Output: ${outputType}, format: ${outputFormat}${modelSpec.outputs.description ? 
       "prompt": "full scene-descriptive prompt in English",
       "reasoning": "why this prompt is effective",
       "tags": ["tag1", "tag2", "tag3"],
-      "params": {},
       "inputAssets": {}
     }
   ]
@@ -147,11 +143,10 @@ export function refinePrompts(
   selected: SelectedWithNote[],
   count: number
 ): string {
-  const inputsDescription = formatInputs(modelSpec);
-  const recommendedRangesText = formatRecommendedRanges(modelSpec);
+  const promptContext = formatPromptContext(modelSpec);
   const guidelinesText = formatGuidelines(modelSpec);
-  const outputType = modelSpec.outputs.type;
-  const outputFormat = modelSpec.outputs.format;
+  const outputType = modelSpecOutputType(modelSpec);
+  const outputFormat = outputType === 'image' || outputType === 'video' ? 'url[]' : 'string';
 
   const selectedBlock = selected
     .map((s, i) => {
@@ -170,18 +165,14 @@ export function refinePrompts(
 ## Selected prompts to evolve (do not copy; improve and diversify)
 ${selectedBlock}
 
-## Model context
+## Model context (prompt writing only — no params)
 ${modelSpec.summary ? `Summary: ${modelSpec.summary}\n` : ''}
-Inputs:
-${inputsDescription}
-
-Recommended parameter ranges:
-${recommendedRangesText}
+Input: ${promptContext}
 
 Prompt writing guidelines (follow strictly):
 ${guidelinesText}
 
-Output: ${outputType}, format: ${outputFormat}${modelSpec.outputs.description ? ` — ${modelSpec.outputs.description}` : ''}
+Output: ${outputType}, format: ${outputFormat}
 
 ## Your job
 1. EVOLVE the selected prompts: take what worked (clarity, structure, appeal) and produce new prompts that are clearly better or different—different angles, stronger scene description, better alignment with guidelines. The new prompts must feel like a clear evolution, not a copy-paste.
@@ -190,7 +181,7 @@ Output: ${outputType}, format: ${outputFormat}${modelSpec.outputs.description ? 
 4. For each prompt provide:
    - reasoning: 1–2 sentences on how this evolved from the selection and why it is stronger.
    - tags: 3–6 short tags (e.g. style, motion, lighting — lowercase, English).
-5. Optionally include params and inputAssets when the model needs them; use recommended ranges and only allowed enum values.
+5. Output ONLY the prompt text. Include inputAssets only when the model needs image/video input.
 
 ## Required JSON shape (return ONLY this, no markdown/code fences)
 {
@@ -199,7 +190,6 @@ Output: ${outputType}, format: ${outputFormat}${modelSpec.outputs.description ? 
       "prompt": "evolved, scene-descriptive prompt in English",
       "reasoning": "how this evolved and why it is better",
       "tags": ["tag1", "tag2", "tag3"],
-      "params": {},
       "inputAssets": {}
     }
   ]

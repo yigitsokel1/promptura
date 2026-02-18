@@ -9,7 +9,7 @@ import type {
   PromptGenerationResult,
   RunCandidatesResult,
 } from './types';
-import type { TaskSpec, ModelRef, CandidatePrompt, RunResult, RunOutput } from '@/src/core/types';
+import type { TaskSpec, ModelRef, CandidatePrompt, RunResult } from '@/src/core/types';
 import type { ModelSpec } from '@/src/core/modelSpec';
 import type { ExecutionProvider } from './execution';
 import { createRun, updateRun } from '@/src/db/queries';
@@ -58,6 +58,17 @@ export class ExecutionRunnerAdapter implements ProviderAdapter {
     );
 
     const CONCURRENCY = 10;
+    // Normalize: ensure image/video from assets are available as legacy task.inputs for buildPayload
+    const imgFromAssets = task.assets?.find((a) => a.type === 'image')?.url;
+    const vidFromAssets = task.assets?.find((a) => a.type === 'video')?.url;
+    const taskInputs = {
+      ...task.inputs,
+      image: task.inputs?.image ?? imgFromAssets,
+      video: task.inputs?.video ?? vidFromAssets,
+      assets: task.assets,
+      _uploadCache: new Map<string, string>(), // Same image/video uploaded once, reused for all candidates
+    };
+
     const jobSubmissions = await limitConcurrency(
       candidates,
       async (candidate) => {
@@ -65,7 +76,7 @@ export class ExecutionRunnerAdapter implements ProviderAdapter {
           const payload = await provider.buildPayload(
             candidate,
             modelSpec,
-            task.inputs
+            taskInputs
           );
           const requestId = await provider.submit(endpointId, payload);
 
@@ -88,13 +99,15 @@ export class ExecutionRunnerAdapter implements ProviderAdapter {
       return {
         results: jobSubmissions.map((s) => ({
           candidateId: s.candidateId,
-          output: {
-            type: 'text' as const,
-            text: s.error
-              ? `Error: ${s.error}`
-              : '[Pending] Job submitted, waiting for completion...',
-          },
-          meta: { latencyMs: Date.now() - startTime },
+          assets: [
+            {
+              type: 'text' as const,
+              content: s.error
+                ? `Error: ${s.error}`
+                : '[Pending] Job submitted, waiting for completion...',
+            },
+          ],
+          metadata: { latencyMs: Date.now() - startTime },
         })),
       };
     }
@@ -104,11 +117,13 @@ export class ExecutionRunnerAdapter implements ProviderAdapter {
         if (submission.error || !submission.requestId) {
           return {
             candidateId: submission.candidateId,
-            output: {
-              type: 'text' as const,
-              text: `Error: ${submission.error ?? 'Failed to submit job'}`,
-            },
-            meta: { latencyMs: Date.now() - startTime },
+            assets: [
+              {
+                type: 'text' as const,
+                content: `Error: ${submission.error ?? 'Failed to submit job'}`,
+              },
+            ],
+            metadata: { latencyMs: Date.now() - startTime },
           };
         }
         const result = await this.pollJobResult(
@@ -122,8 +137,8 @@ export class ExecutionRunnerAdapter implements ProviderAdapter {
         );
         return {
           candidateId: submission.candidateId,
-          output: result.output,
-          meta: result.meta,
+          assets: result.assets,
+          metadata: result.metadata,
         };
       })
     );
@@ -140,7 +155,7 @@ export class ExecutionRunnerAdapter implements ProviderAdapter {
     startTime: number,
     maxWaitMs = 300_000,
     pollIntervalMs = 2000
-  ): Promise<{ output: RunOutput; meta: { latencyMs: number } }> {
+  ): Promise<{ assets: import('@/src/core/types').OutputAsset[]; metadata: { latencyMs: number } }> {
     const deadline = Date.now() + maxWaitMs;
     while (Date.now() < deadline) {
       const status = await provider.getStatus(endpointId, requestId);
@@ -152,13 +167,13 @@ export class ExecutionRunnerAdapter implements ProviderAdapter {
           await updateRun(iterationId, candidateId, { status: 'error', error: err });
           throw new Error(`Job failed: ${err}`);
         }
-        const output = provider.convertToRunOutput(result.output, modelSpec);
+        const assets = provider.convertToOutputAssets(result.output, modelSpec);
         await updateRun(iterationId, candidateId, {
           status: 'done',
-          outputJson: output,
+          outputJson: { assets },
           latencyMs,
         });
-        return { output, meta: { latencyMs } };
+        return { assets, metadata: { latencyMs } };
       }
       await new Promise((r) => setTimeout(r, pollIntervalMs));
     }

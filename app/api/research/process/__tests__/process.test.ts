@@ -8,7 +8,7 @@ import { NextRequest } from 'next/server';
 import { prisma } from '@/src/db/client';
 import { createFalAIClientFromEnv } from '@/src/providers/falai/helpers';
 import { researchModelWithGemini } from '@/src/providers/gemini/helpers';
-import type { ModelSpec } from '@/src/core/modelSpec';
+import type { ResearchGuidelinesResult } from '@/src/core/modelSpec';
 
 // Mock dependencies
 jest.mock('@/src/lib/auth', () => ({
@@ -72,6 +72,8 @@ describe('POST /api/research/process', () => {
       kind: 'model',
       modality: 'image',
       status: 'pending_research',
+      source: 'fal.ai',
+      provider: 'falai',
     };
 
     const mockResearchJob = {
@@ -91,19 +93,13 @@ describe('POST /api/research/process', () => {
       },
     };
 
-    const mockModelSpec: ModelSpec = {
-      inputs: [
-        { name: 'prompt', type: 'string', required: true },
-        { name: 'steps', type: 'number', required: false, min: 1, max: 50 },
-      ],
-      outputs: {
-        type: 'image',
-        format: 'url[]',
-      },
+    // Gemini returns only guidelines + summary (Sprint 7); runResearchJob merges with modality/required_assets
+    const mockGuidelines: ResearchGuidelinesResult = {
       prompt_guidelines: [
         'Describe subject clearly',
         'Avoid ambiguous styles',
       ],
+      summary: 'Fast text-to-image generation',
     };
 
     // Setup mocks (route uses findFirst to get jobId, then runResearchJob uses findUnique with include)
@@ -116,8 +112,8 @@ describe('POST /api/research/process', () => {
     };
     (createFalAIClientFromEnv as jest.Mock).mockReturnValue(mockFalClient);
 
-    // Mock Gemini helper
-    (researchModelWithGemini as jest.Mock).mockResolvedValue(mockModelSpec);
+    // Mock Gemini helper (guidelines only)
+    (researchModelWithGemini as jest.Mock).mockResolvedValue(mockGuidelines);
 
     // Mock prisma update calls - chain them to return updated values
     (prisma.researchJob.update as jest.Mock)
@@ -134,7 +130,7 @@ describe('POST /api/research/process', () => {
     (prisma.modelSpec.create as jest.Mock).mockResolvedValue({
       id: 'spec-id-123',
       modelEndpointId: 'model-id-123',
-      specJson: mockModelSpec,
+      specJson: { modality: 'text-to-image', required_assets: 'none', ...mockGuidelines },
     });
 
     (prisma.modelEndpoint.update as jest.Mock).mockResolvedValue({
@@ -168,11 +164,11 @@ describe('POST /api/research/process', () => {
     // Verify fal.ai was called
     expect(mockFalClient.findModel).toHaveBeenCalledWith('fal-ai/flux/dev');
 
-    // Verify Gemini was called (mocked)
+    // Verify Gemini was called with full modality (guidelines-only research)
     expect(researchModelWithGemini).toHaveBeenCalledWith(
       mockModelMetadata,
       'model',
-      'image'
+      'text-to-image'
     );
 
     // Verify spec was saved to DB
