@@ -301,14 +301,57 @@ export default function AdminModelDetailPage() {
               {latestJob.error && (
                 <div>
                   <label className="text-xs font-medium text-zinc-500 dark:text-zinc-400">
-                    Error
+                    Root cause (error)
                   </label>
-                  <p className="mt-1 text-sm text-red-600 dark:text-red-400">
+                  <p className="mt-1 text-sm text-red-600 dark:text-red-400 font-mono whitespace-pre-wrap break-words">
                     {latestJob.error}
                   </p>
                 </div>
               )}
+              {(latestJob.retryCount != null && latestJob.retryCount > 0) && (
+                <div>
+                  <label className="text-xs font-medium text-zinc-500 dark:text-zinc-400">
+                    Retry count
+                  </label>
+                  <p className="mt-1 text-sm text-zinc-900 dark:text-zinc-50">
+                    {latestJob.retryCount}
+                  </p>
+                </div>
+              )}
+              {latestJob.runAt && (
+                <div>
+                  <label className="text-xs font-medium text-zinc-500 dark:text-zinc-400">
+                    Next run (backoff)
+                  </label>
+                  <p className="mt-1 text-sm text-zinc-900 dark:text-zinc-50">
+                    {new Date(latestJob.runAt).toLocaleString()}
+                  </p>
+                </div>
+              )}
             </div>
+          </div>
+        )}
+
+        {/* Modality debug panel — why did modality come out like this? */}
+        {Boolean(
+          latestSpec?.specJson &&
+            typeof latestSpec.specJson === 'object' &&
+            'modality_debug' in (latestSpec.specJson as object)
+        ) && (
+          <div className="mb-6 rounded-lg border border-zinc-200 bg-white p-6 shadow-sm dark:border-zinc-800 dark:bg-zinc-900">
+            <h2 className="mb-4 text-xl font-semibold text-black dark:text-zinc-50">
+              Modality debug
+            </h2>
+            <p className="mb-3 text-sm text-zinc-600 dark:text-zinc-400">
+              How modality and required_assets were derived (schema-asset-analyzer).
+            </p>
+            <pre className="max-h-80 overflow-auto rounded-md border border-zinc-300 bg-zinc-50 p-4 text-xs dark:border-zinc-700 dark:bg-zinc-800">
+              {JSON.stringify(
+                (latestSpec.specJson as { modality_debug?: unknown }).modality_debug,
+                null,
+                2
+              )}
+            </pre>
           </div>
         )}
 

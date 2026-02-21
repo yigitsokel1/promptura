@@ -78,7 +78,9 @@ export class ExecutionRunnerAdapter implements ProviderAdapter {
             modelSpec,
             taskInputs
           );
-          const requestId = await provider.submit(endpointId, payload);
+          const requestId = await provider.submit(endpointId, payload, {
+            requiredInputDefaults: modelSpec.required_input_defaults,
+          });
 
           await updateRun(iterationId, candidate.id, {
             falRequestId: requestId,

@@ -18,6 +18,26 @@ import { convertFalAIOutputToOutputAssets } from '@/src/providers/falai/helpers'
 const EACHLABS_BASE = 'https://api.eachlabs.ai';
 const EACHLABS_PREDICTION_URL = `${EACHLABS_BASE}/v1/prediction`;
 
+const LOG_MAX_BODY_CHARS = 500;
+
+/** Truncate string for logging to avoid huge base64 in terminal. */
+function truncateForLog(s: string, max = LOG_MAX_BODY_CHARS): string {
+  if (s.length <= max) return s;
+  return s.slice(0, max) + `... (truncated, total ${s.length} chars)`;
+}
+
+/** Summarize request body for error logs without dumping base64. */
+function summarizeBody(body: Record<string, unknown>): string {
+  const keys = Object.keys(body);
+  let size = 0;
+  try {
+    size = JSON.stringify(body).length;
+  } catch {
+    size = -1;
+  }
+  return `keys: [${keys.join(', ')}], size: ${size} chars`;
+}
+
 /** Fetch model version from EachLabs (GET /v1/model?slug=). Uses given apiKey. Returns version or '1.0'. */
 async function fetchEachLabsModelVersion(slug: string, apiKey: string): Promise<string> {
   try {
@@ -44,6 +64,24 @@ function cleanInput(input: Record<string, unknown>): Record<string, unknown> {
   return out;
 }
 
+/**
+ * Apply defaults from research (request_schema) when present; else legacy fallback for known EachLabs params.
+ * Only used in this provider.
+ */
+function applyEachLabsInputDefaults(
+  input: Record<string, unknown>,
+  requiredInputDefaults?: Record<string, unknown>
+): void {
+  if (requiredInputDefaults && Object.keys(requiredInputDefaults).length > 0) {
+    for (const [key, value] of Object.entries(requiredInputDefaults)) {
+      if (input[key] === undefined) input[key] = value;
+    }
+    return;
+  }
+  if (input.quality === undefined) input.quality = 'high';
+  if (input.duration === undefined) input.duration = 5;
+}
+
 function mapStatus(
   apiStatus: string
 ): 'queued' | 'running' | 'completed' | 'failed' {
@@ -63,6 +101,7 @@ function mapStatus(
 
 /**
  * User-friendly EachLabs error message. 5xx can be server error or wrong request format.
+ * Detects 413 (payload too large) in response details and suggests using a URL instead of inline data.
  */
 function formatEachLabsError(
   status: number,
@@ -73,7 +112,11 @@ function formatEachLabsError(
   const trimmed = body.trim();
   const hasDetail = trimmed.length > 0 && trimmed !== '{}';
   const is5xx = status >= 500;
+  const is413 = status === 413 || /413|Request Entity Too Large|payload.*too large|SQS.*413/i.test(trimmed);
 
+  if (is413) {
+    return 'Request too large (413). The provider limits request size. Use a short video or a video URL instead of uploading a large file; large inline video may fail.';
+  }
   if (is5xx && !hasDetail) {
     return `EachLabs API ${status} ${statusText}. Server response body is empty. Check [EachLabs] logs in the terminal for the request. EachLabs sometimes returns 500 for accounts with balance; retry or contact EachLabs support.`;
   }
@@ -100,14 +143,34 @@ export class EachLabsExecutionProvider implements ExecutionProvider {
     });
   }
 
-  async submit(endpointId: string, payload: Record<string, unknown>): Promise<string> {
+  /**
+   * Max request body size (chars). The limit is EachLabs' infrastructure: they enqueue jobs to
+   * the underlying model (e.g. pixverse) via SQS, and that step returns 413 for larger payloads.
+   * So it's not the model's API limit — it's EachLabs' queue/message size limit. We use 1 MB
+   * so requests succeed or fail fast. Use a video URL instead of inline base64 to avoid the limit.
+   */
+  private static readonly MAX_BODY_CHARS = 1_000_000;
+
+  async submit(
+    endpointId: string,
+    payload: Record<string, unknown>,
+    options?: { requiredInputDefaults?: Record<string, unknown> }
+  ): Promise<string> {
     const version = await fetchEachLabsModelVersion(endpointId, this.apiKey);
     const input = cleanInput(payload);
+    applyEachLabsInputDefaults(input, options?.requiredInputDefaults);
     const body = {
       model: endpointId,
       version,
       input,
     };
+
+    const bodyJson = JSON.stringify(body);
+    if (bodyJson.length > EachLabsExecutionProvider.MAX_BODY_CHARS) {
+      throw new Error(
+        'Request too large (413). The provider limits request size. Use a short video or a video URL instead of uploading a large file; large inline video may fail.'
+      );
+    }
 
     const res = await fetch(`${EACHLABS_PREDICTION_URL}/`, {
       method: 'POST',
@@ -115,14 +178,12 @@ export class EachLabsExecutionProvider implements ExecutionProvider {
         'Content-Type': 'application/json',
         'X-API-Key': this.apiKey,
       },
-      body: JSON.stringify(body),
+      body: bodyJson,
     });
 
     const text = await res.text();
     if (!res.ok) {
-      console.error('[EachLabs] POST /v1/prediction/ failed');
-      console.error('[EachLabs] Request body:', JSON.stringify(body, null, 2));
-      console.error('[EachLabs] Response:', res.status, res.statusText, '| body:', text || '(empty)');
+      console.error('[EachLabs] POST /v1/prediction/ failed', res.status, res.statusText, '| request:', summarizeBody(body), '| response:', truncateForLog(text || '(empty)'));
       throw new Error(formatEachLabsError(res.status, res.statusText, text, 'submit'));
     }
 
@@ -184,22 +245,69 @@ export class EachLabsExecutionProvider implements ExecutionProvider {
       }
     );
 
+    const MAX_BODY_PARSE_BYTES = 1024 * 1024; // 1MB – larger responses are often truncated at ~10MB and break JSON
+    const contentLength = res.headers.get('Content-Length');
+    const contentLengthNum = contentLength ? parseInt(contentLength, 10) : NaN;
+    if (!Number.isNaN(contentLengthNum) && contentLengthNum > MAX_BODY_PARSE_BYTES) {
+      console.error('[EachLabs] GET /v1/prediction/{id} response too large (Content-Length)', { predictionId, contentLength: contentLengthNum });
+      throw new Error(
+        `EachLabs response too large (${(contentLengthNum / 1024 / 1024).toFixed(1)}MB). The API may be returning inline video/data. We do not parse responses over 1MB. Try a different model or contact EachLabs.`
+      );
+    }
+
     const text = await res.text();
     if (!res.ok) {
-      console.error('[EachLabs] GET /v1/prediction/{id} failed', { predictionId, status: res.status, statusText: res.statusText, body: text || '(empty)' });
+      console.error('[EachLabs] GET /v1/prediction/{id} failed', { predictionId, status: res.status, statusText: res.statusText, body: truncateForLog(text || '(empty)') });
       throw new Error(formatEachLabsError(res.status, res.statusText, text, 'get'));
     }
 
-    const data = JSON.parse(text) as {
+    if (text.length > MAX_BODY_PARSE_BYTES) {
+      console.error('[EachLabs] GET /v1/prediction/{id} response too large', { predictionId, length: text.length });
+      throw new Error(
+        `EachLabs response too large (${(text.length / 1024 / 1024).toFixed(1)}MB). The API may be returning inline video/data or the response was truncated. We do not parse responses over 1MB to avoid JSON errors. Try a different model or contact EachLabs.`
+      );
+    }
+
+    let data: {
       status?: string;
       output?: unknown;
       error?: string;
       message?: string;
+      detail?: string;
+      reason?: string;
     };
+    try {
+      data = JSON.parse(text) as typeof data;
+    } catch (parseErr) {
+      const msg = parseErr instanceof Error ? parseErr.message : String(parseErr);
+      const positionMatch = msg.match(/position\s+(\d+)/i);
+      const position = positionMatch ? parseInt(positionMatch[1], 10) : 0;
+      const truncatedAt10MB = position >= 10 * 1024 * 1024 - 1000 || text.length >= 10 * 1024 * 1024 - 1000;
+      console.error('[EachLabs] GET /v1/prediction/{id} JSON parse failed', { predictionId, length: text.length, error: msg });
+      if (truncatedAt10MB) {
+        throw new Error(
+          'EachLabs returned a very large response (~10MB) that was likely truncated, causing invalid JSON. This often happens with video-to-video outputs. Try a different model or contact EachLabs; we do not parse responses over 1MB to avoid this error.'
+        );
+      }
+      throw new Error(
+        `EachLabs returned invalid JSON (${(text.length / 1024).toFixed(0)}KB). This often happens with large video outputs (truncated or malformed response). Error: ${msg}`
+      );
+    }
+
+    const status = data.status ?? 'running';
+    const failed = status === 'error' || status === 'cancelled';
+    const errorText =
+      data.error ??
+      data.message ??
+      data.detail ??
+      data.reason ??
+      (failed
+        ? 'Job failed (no details from EachLabs). Often due to request size limit — use a video URL or a shorter clip.'
+        : undefined);
     return {
-      status: data.status ?? 'running',
+      status,
       output: data.output,
-      error: data.error ?? data.message,
+      error: errorText,
     };
   }
 }

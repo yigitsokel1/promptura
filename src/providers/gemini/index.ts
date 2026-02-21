@@ -11,7 +11,7 @@ import type {
   RunCandidatesResult,
 } from '../types';
 import type { TaskSpec, ModelRef, CandidatePrompt } from '@/src/core/types';
-import type { ModelSpec, ResearchGuidelinesResult } from '@/src/core/modelSpec';
+import type { ResearchGuidelinesResult } from '@/src/core/modelSpec';
 import { modelSpecNeedsImage, modelSpecNeedsVideo } from '@/src/core/modelSpec';
 import type { FalAIModelMetadata } from '../falai/types';
 import {

@@ -97,9 +97,20 @@ jest.mock('@/src/providers', () => ({
   })),
 }));
 
-// Mock prisma (Blok B: iteration.upsert for createIterationRecord)
+// Mock prisma (Blok B: iteration.upsert; Sprint 3: rateLimitBucket for checkRateLimit)
 jest.mock('@/src/db/client', () => ({
   prisma: {
+    $transaction: jest.fn((fn: (tx: unknown) => Promise<boolean>) => {
+      const tx = {
+        rateLimitBucket: {
+          deleteMany: jest.fn(() => Promise.resolve()),
+          findUnique: jest.fn(() => Promise.resolve(null)),
+          update: jest.fn(() => Promise.resolve()),
+          create: jest.fn(() => Promise.resolve()),
+        },
+      };
+      return fn(tx);
+    }),
     modelEndpoint: { findUnique: jest.fn() },
     iteration: {
       upsert: jest.fn(() => Promise.resolve()),

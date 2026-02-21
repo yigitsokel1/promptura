@@ -69,6 +69,17 @@ jest.mock('@/src/providers', () => ({
 
 jest.mock('@/src/db/client', () => ({
   prisma: {
+    $transaction: jest.fn((fn: (tx: unknown) => Promise<boolean>) => {
+      const tx = {
+        rateLimitBucket: {
+          deleteMany: jest.fn(() => Promise.resolve()),
+          findUnique: jest.fn(() => Promise.resolve(null)),
+          update: jest.fn(() => Promise.resolve()),
+          create: jest.fn(() => Promise.resolve()),
+        },
+      };
+      return fn(tx);
+    }),
     modelEndpoint: { findUnique: jest.fn() },
     run: { findMany: jest.fn() },
     iteration: {

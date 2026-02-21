@@ -8,6 +8,7 @@ import { buildExecutionPayload } from '../execution-payload';
 import { convertFalAIOutputToOutputAssets } from '@/src/providers/falai/helpers';
 import { executionProviderFactory } from '@/src/providers/execution';
 import { supportsModality } from '../provider-capabilities';
+import { combineOutputAndAssetsToModality } from '../modality-inference';
 import type { TaskAsset } from '@/src/core/types';
 import type { ModelSpec } from '@/src/core/modelSpec';
 
@@ -156,6 +157,32 @@ describe('Modality Test Matrix', () => {
 
     it('eachlabs supports image-to-video', () => {
       expect(supportsModality('eachlabs', 'image-to-video')).toBe(true);
+    });
+  });
+
+  describe('combineOutputAndAssetsToModality', () => {
+    it('output text → text-to-text', () => {
+      expect(combineOutputAndAssetsToModality('text', 'none')).toBe('text-to-text');
+    });
+
+    it('output image + none → text-to-image', () => {
+      expect(combineOutputAndAssetsToModality('image', 'none')).toBe('text-to-image');
+    });
+
+    it('output image + image → image-to-image', () => {
+      expect(combineOutputAndAssetsToModality('image', 'image')).toBe('image-to-image');
+    });
+
+    it('output video + none → text-to-video', () => {
+      expect(combineOutputAndAssetsToModality('video', 'none')).toBe('text-to-video');
+    });
+
+    it('output video + image → image-to-video', () => {
+      expect(combineOutputAndAssetsToModality('video', 'image')).toBe('image-to-video');
+    });
+
+    it('output video + video → video-to-video', () => {
+      expect(combineOutputAndAssetsToModality('video', 'video')).toBe('video-to-video');
     });
   });
 });

@@ -41,5 +41,7 @@ export interface ModelEndpointWithRelations {
     error?: string | null;
     startedAt: Date | string | null;
     finishedAt?: Date | string | null;
+    retryCount?: number;
+    runAt?: Date | string | null;
   }>;
 }

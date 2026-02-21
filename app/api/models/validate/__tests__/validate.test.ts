@@ -26,6 +26,7 @@ jest.mock('@/src/providers/eachlabs/helpers', () => ({
 }));
 jest.mock('@/src/lib/research-helpers', () => ({
   runResearchJob: jest.fn(() => Promise.resolve()),
+  startResearchQueueTicker: jest.fn(),
 }));
 jest.mock('@/src/db/client', () => ({
   prisma: {

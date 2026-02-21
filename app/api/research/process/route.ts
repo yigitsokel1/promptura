@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { prisma } from '@/src/db/client';
-import { runResearchJob } from '@/src/lib/research-helpers';
+import { runResearchJob, startResearchQueueTicker } from '@/src/lib/research-helpers';
 import { handleApiError } from '@/src/lib/api-helpers';
 import { requireAdmin, unauthorizedResponse } from '@/src/lib/auth';
 
@@ -36,9 +36,13 @@ export async function POST(request: NextRequest) {
       }
       jobId = job.id;
     } else {
+      const now = new Date();
       const next = await prisma.researchJob.findFirst({
-        where: { status: 'queued' },
-        orderBy: { startedAt: 'asc' },
+        where: {
+          status: 'queued',
+          OR: [{ runAt: null }, { runAt: { lte: now } }],
+        },
+        orderBy: [{ runAt: 'asc' }, { startedAt: 'asc' }],
         select: { id: true },
       });
       if (!next) {
@@ -47,6 +51,7 @@ export async function POST(request: NextRequest) {
       jobId = next.id;
     }
 
+    startResearchQueueTicker();
     await runResearchJob(jobId);
 
     return NextResponse.json({

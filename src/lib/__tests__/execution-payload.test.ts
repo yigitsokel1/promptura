@@ -28,6 +28,7 @@ describe('Task asset mapping (buildExecutionPayload)', () => {
     });
     expect(payload.prompt).toBe('watercolor style');
     expect(payload.image_url).toBe(IMAGE_URL);
+    expect(payload.image_urls).toEqual([IMAGE_URL]);
   });
 
   it('maps task asset video to video_url when spec requires video', () => {
@@ -82,6 +83,7 @@ describe('Task asset mapping (buildExecutionPayload)', () => {
     });
     expect(payload.prompt).toBe('a cat');
     expect(payload).not.toHaveProperty('image_url');
+    expect(payload).not.toHaveProperty('image_urls');
     expect(payload).not.toHaveProperty('video_url');
   });
 });

@@ -43,8 +43,13 @@ export interface ExecutionProvider {
 
   /**
    * Submit a job. Returns request ID for status/result polling.
+   * options.requiredInputDefaults: provider-specific defaults for required params (e.g. from research request_schema); only that provider uses them.
    */
-  submit(endpointId: string, payload: Record<string, unknown>): Promise<string>;
+  submit(
+    endpointId: string,
+    payload: Record<string, unknown>,
+    options?: { requiredInputDefaults?: Record<string, unknown> }
+  ): Promise<string>;
 
   /**
    * Get current job status.

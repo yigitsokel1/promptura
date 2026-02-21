@@ -11,7 +11,7 @@ import { PrismaAdapter } from '@auth/prisma-adapter';
 import { prisma } from '@/src/db/client';
 
 export const { handlers, auth, signIn, signOut } = NextAuth({
-  adapter: PrismaAdapter(prisma),
+  adapter: prisma ? PrismaAdapter(prisma) : undefined,
   providers: [
     Google({
       clientId: process.env.AUTH_GOOGLE_ID!,
@@ -22,12 +22,15 @@ export const { handlers, auth, signIn, signOut } = NextAuth({
     async jwt({ token, user }) {
       if (user) {
         token.id = (user as { id?: string }).id;
-        // Role from DB (adapter may not pass custom fields to jwt)
-        const dbUser = await prisma.user.findUnique({
-          where: { id: (user as { id?: string }).id },
-          select: { role: true },
-        });
-        token.role = dbUser?.role ?? 'USER';
+        if (prisma) {
+          const dbUser = await prisma.user.findUnique({
+            where: { id: (user as { id?: string }).id },
+            select: { role: true },
+          });
+          token.role = dbUser?.role ?? 'USER';
+        } else {
+          token.role = 'USER';
+        }
       }
       return token;
     },

@@ -12,6 +12,7 @@ import {
   updateIterationError,
 } from '@/src/db/queries';
 import { handleApiError } from '@/src/lib/api-helpers';
+import { taskJsonForStorage } from '@/src/lib/task-assets';
 import { requireAuth, unauthorizedResponse } from '@/src/lib/auth';
 import { requireUserProviderKey, type ProviderSlug } from '@/src/lib/provider-keys';
 import { checkRateLimit, getRateLimitMax, getRateLimitWindowMs } from '@/src/lib/rate-limit';
@@ -27,7 +28,7 @@ export async function POST(request: NextRequest) {
   const session = await requireAuth();
   if (!session) return unauthorizedResponse();
 
-  if (!checkRateLimit(session.user.id)) {
+  if (!(await checkRateLimit(session.user.id))) {
     const windowSec = Math.ceil(getRateLimitWindowMs() / 1000);
     return NextResponse.json(
       {
@@ -76,7 +77,22 @@ export async function POST(request: NextRequest) {
         modelEndpointId: modelEndpointIdRaw.trim(),
       };
     } else {
-      body = await request.json();
+      try {
+        body = await request.json();
+      } catch (parseErr) {
+        const msg = parseErr instanceof Error ? parseErr.message : String(parseErr);
+        if (msg.includes('Unterminated string') || msg.includes('JSON')) {
+          return NextResponse.json(
+            {
+              error:
+                'Request body is too large or was truncated (Next.js limits request size). For large images or video, use a URL instead of base64, or reduce the file size.',
+              code: 'PayloadTooLarge',
+            },
+            { status: 413 }
+          );
+        }
+        throw parseErr;
+      }
     }
 
     if (!body.task || !body.modelEndpointId) {
@@ -206,12 +222,12 @@ export async function POST(request: NextRequest) {
       candidateCount = 5;
     }
 
-    // Create iteration record with task; return 202 immediately so client timeout cannot kill Gemini
+    // Create iteration record with task (storage-safe: no base64 in taskJson to avoid Prisma 5MB limit)
     await createIterationRecord({
       id: iterationId,
       modelEndpointId,
       userId: session.user.id,
-      taskJson: { goal: task.goal, modality: task.modality, assets: task.assets },
+      taskJson: taskJsonForStorage(task),
     }).catch((err) =>
       console.warn('[Generate] Iteration record create failed:', err)
     );

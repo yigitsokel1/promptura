@@ -5,6 +5,8 @@ const nextConfig: NextConfig = {
     serverActions: {
       bodySizeLimit: '10mb',
     },
+    // Allow large POST bodies for /api/iterations/generate (e.g. video-to-video with base64 video in task)
+    proxyClientMaxBodySize: '50mb',
   },
   images: {
     remotePatterns: [

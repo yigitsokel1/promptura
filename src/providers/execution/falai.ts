@@ -28,7 +28,11 @@ export class FalAIExecutionProvider implements ExecutionProvider {
     return buildFalAIPayload(candidate, modelSpec, taskInputs, this.client);
   }
 
-  async submit(endpointId: string, payload: Record<string, unknown>): Promise<string> {
+  async submit(
+    endpointId: string,
+    payload: Record<string, unknown>,
+    _options?: { requiredInputDefaults?: Record<string, unknown> }
+  ): Promise<string> {
     return this.client.submitQueueJob(endpointId, payload);
   }
 

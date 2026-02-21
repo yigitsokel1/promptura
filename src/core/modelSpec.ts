@@ -18,6 +18,13 @@ export interface ModelSpec {
   prompt_guidelines: string[];
   /** Optional summary of how the model works */
   summary?: string;
+  /** Debug: asset-related schema property names that contributed to required_assets (not persisted to DB). */
+  detected_input_fields?: string[];
+  /**
+   * Provider-specific defaults for required input params (e.g. EachLabs quality, duration).
+   * Filled at research from provider request_schema; only that provider uses these at execution.
+   */
+  required_input_defaults?: Record<string, unknown>;
 }
 
 /**

@@ -98,6 +98,115 @@ export function determineModalityFromEndpointId(endpointId: string): 'text' | 'i
 
 const FAL_OPENAPI_SCHEMA_URL = 'https://fal.ai/api/openapi/queue/openapi.json';
 
+/** OpenAPI 3 requestBody content schema (may have $ref or inline properties). */
+type OpenApiSchema = {
+  $ref?: string;
+  properties?: Record<string, { default?: unknown }>;
+  required?: string[];
+};
+
+/** Resolve schema from $ref (#/components/schemas/Name) or return schema with properties. */
+function resolveRequestSchema(
+  schema: OpenApiSchema | undefined,
+  components: { schemas?: Record<string, OpenApiSchema> } | undefined
+): OpenApiSchema | undefined {
+  if (!schema) return undefined;
+  if (schema.properties) return schema;
+  const ref = schema.$ref;
+  if (!ref || typeof ref !== 'string') return undefined;
+  const name = ref.replace(/^#\/components\/schemas\//, '');
+  const resolved = components?.schemas?.[name];
+  return resolved ?? undefined;
+}
+
+export interface FalOpenApiInputSchema {
+  keys: string[];
+  /** When schema has a required array, only these count as required for asset inference. */
+  required?: string[];
+}
+
+/**
+ * Fetch Fal.ai OpenAPI schema for the endpoint and return request body input property keys + required array.
+ * Uses the same queue OpenAPI URL as validate fallback; standard OpenAPI 3 requestBody pattern.
+ * Use with inferRequiredAssetsFromPropertyKeys(keys, required ? { required } : undefined) for required_assets.
+ *
+ * @param endpointId - e.g. "fal-ai/flux/dev"
+ * @returns { keys, required? }; keys = all property names; required = schema.required when present
+ */
+export async function getFalOpenApiInputPropertyKeys(
+  endpointId: string
+): Promise<FalOpenApiInputSchema> {
+  try {
+    const url = `${FAL_OPENAPI_SCHEMA_URL}?endpoint_id=${encodeURIComponent(endpointId)}`;
+    const res = await fetch(url, { headers: { Accept: 'application/json' } });
+    if (!res.ok) return { keys: [] };
+    const json = (await res.json()) as {
+      paths?: Record<string, { post?: { requestBody?: { content?: Record<string, { schema?: OpenApiSchema }> } } }>;
+      components?: { schemas?: Record<string, OpenApiSchema> };
+    };
+    const paths = json?.paths ?? {};
+    const components = json?.components;
+
+    for (const pathItem of Object.values(paths)) {
+      const post = pathItem?.post;
+      if (!post?.requestBody?.content) continue;
+      const content = post.requestBody.content;
+      const jsonContent = content['application/json'];
+      const schema = jsonContent?.schema;
+      if (!schema) continue;
+      const resolved = resolveRequestSchema(schema, components);
+      if (resolved?.properties && typeof resolved.properties === 'object') {
+        const keys = Object.keys(resolved.properties);
+        const required =
+          Array.isArray(resolved.required) && resolved.required.length > 0
+            ? resolved.required
+            : undefined;
+        return { keys, required };
+      }
+    }
+    return { keys: [] };
+  } catch {
+    return { keys: [] };
+  }
+}
+
+/**
+ * Build required_input_defaults from Fal.ai OpenAPI schema (research time).
+ * For each required key: use schema property default when present.
+ * Only includes keys that have a default in schema; used so execution can fill missing required params.
+ */
+export async function getFalRequiredInputDefaults(endpointId: string): Promise<Record<string, unknown>> {
+  try {
+    const url = `${FAL_OPENAPI_SCHEMA_URL}?endpoint_id=${encodeURIComponent(endpointId)}`;
+    const res = await fetch(url, { headers: { Accept: 'application/json' } });
+    if (!res.ok) return {};
+    const json = (await res.json()) as {
+      paths?: Record<string, { post?: { requestBody?: { content?: Record<string, { schema?: OpenApiSchema }> } } }>;
+      components?: { schemas?: Record<string, OpenApiSchema> };
+    };
+    const paths = json?.paths ?? {};
+    const components = json?.components;
+    for (const pathItem of Object.values(paths)) {
+      const post = pathItem?.post;
+      if (!post?.requestBody?.content) continue;
+      const schema = post.requestBody.content['application/json']?.schema;
+      const resolved = resolveRequestSchema(schema, components);
+      const required = Array.isArray(resolved?.required) && resolved.required.length > 0 ? resolved.required : [];
+      if (required.length === 0 || !resolved?.properties || typeof resolved.properties !== 'object') continue;
+      const out: Record<string, unknown> = {};
+      for (const key of required) {
+        const prop = resolved.properties[key];
+        const defaultVal = prop && typeof prop === 'object' && 'default' in prop ? prop.default : undefined;
+        if (defaultVal !== undefined && defaultVal !== null) out[key] = defaultVal;
+      }
+      return out;
+    }
+    return {};
+  } catch {
+    return {};
+  }
+}
+
 /**
  * Validate model exists via Fal.ai OpenAPI schema (no auth).
  * Fallback when Platform API (v1/models) returns 5xx.
@@ -160,12 +269,19 @@ export async function buildFalAIPayload(
   _client?: FalAIClient
 ): Promise<Record<string, unknown>> {
   const taskAssets = taskInputsToAssets(taskInputs);
-  return buildExecutionPayload({
+  const payload = buildExecutionPayload({
     modelSpec,
     prompt: candidate.prompt,
     taskAssets,
     inputAssets: candidate.inputAssets,
   });
+  const defaults = modelSpec.required_input_defaults;
+  if (defaults && Object.keys(defaults).length > 0) {
+    for (const [key, value] of Object.entries(defaults)) {
+      if (payload[key] === undefined) payload[key] = value;
+    }
+  }
+  return payload;
 }
 
 /**

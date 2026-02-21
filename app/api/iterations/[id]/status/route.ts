@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import {
   updateRun,
   updateIterationFinishedAt,
-  findIterationById,
+  findIterationByIdLight,
 } from '@/src/db/queries';
 import { prisma } from '@/src/db/client';
 import { handleApiError } from '@/src/lib/api-helpers';
@@ -14,6 +14,9 @@ import type { ExecutionProviderSlug } from '@/src/providers/execution';
 import { limitConcurrencySettled } from '@/src/lib/concurrency';
 import { requireUserProviderKey, type ProviderSlug } from '@/src/lib/provider-keys';
 import { requireAuth, unauthorizedResponse } from '@/src/lib/auth';
+
+/** Iteration IDs that already hit P6009 (response >5MB); skip heavy fetch on subsequent polls to avoid log spam. */
+const iterationIdsOverSizeLimit = new Set<string>();
 
 interface StatusResponse {
   iterationId: string;
@@ -37,21 +40,20 @@ export async function GET(
   request: NextRequest,
   { params }: { params: Promise<{ id: string }> }
 ) {
+  const { id: iterationId } = await params;
+  if (!iterationId) {
+    return NextResponse.json(
+      { error: 'Missing iterationId' },
+      { status: 400 }
+    );
+  }
+
   try {
     const session = await requireAuth();
     if (!session) return unauthorizedResponse();
 
-    const { id: iterationId } = await params;
-
-    if (!iterationId) {
-      return NextResponse.json(
-        { error: 'Missing iterationId' },
-        { status: 400 }
-      );
-    }
-
-    // Ensure iteration belongs to current user (userId in request context)
-    const iterationRecord = await findIterationById(iterationId);
+    // Ensure iteration belongs to current user (use light query to avoid P6009 on large taskJson)
+    const iterationRecord = await findIterationByIdLight(iterationId);
     if (iterationRecord?.userId && iterationRecord.userId !== session.user.id) {
       return NextResponse.json({ error: 'Forbidden' }, { status: 403 });
     }
@@ -88,7 +90,7 @@ export async function GET(
       // Check status of "running" runs (Blok C: use ExecutionProvider from factory)
       const runningRuns = runs.filter((run) => run.status === 'running' && run.falRequestId && run.modelEndpoint);
       if (runningRuns.length > 0) {
-        const iterationRecord = await findIterationById(iterationId);
+        const iterationRecord = await findIterationByIdLight(iterationId);
         const userId = iterationRecord?.userId ?? null;
         const providerSlug = (runningRuns[0].modelEndpoint?.provider ?? 'falai') as ExecutionProviderSlug;
         if (!userId) {
@@ -220,14 +222,49 @@ export async function GET(
       );
     }
 
-    const iterationRow = await prisma.iteration.findUnique({
-      where: { id: iterationId },
-    });
-    const it = iterationRow as { taskJson?: unknown; candidatesJson?: unknown[]; errorMessage?: string } | null;
+    let iterationRow: { taskJson?: unknown; candidatesJson?: unknown[]; errorMessage?: string } | null = null;
+    let responseError: string | undefined;
+    const isP6009 = (err: unknown): boolean => {
+      const msg = err instanceof Error ? err.message : String(err);
+      return msg.includes('P6009') || msg.includes('response size') || msg.includes('exceeded the the maximum of 5MB');
+    };
+
+    if (iterationIdsOverSizeLimit.has(iterationId)) {
+      const light = await findIterationByIdLight(iterationId);
+      iterationRow = light ? { errorMessage: light.errorMessage ?? undefined } : null;
+      responseError =
+        'Iteration data too large (Prisma 5MB limit). Use smaller task assets (e.g. URLs instead of base64) or increase the limit in Prisma Console.';
+    } else {
+      try {
+        const row = await prisma.iteration.findUnique({
+          where: { id: iterationId },
+          select: { taskJson: true, candidatesJson: true, errorMessage: true },
+        });
+        iterationRow = row
+          ? {
+              taskJson: row.taskJson,
+              candidatesJson: Array.isArray(row.candidatesJson) ? row.candidatesJson : undefined,
+              errorMessage: row.errorMessage ?? undefined,
+            }
+          : null;
+      } catch (err) {
+        if (isP6009(err)) {
+          iterationIdsOverSizeLimit.add(iterationId);
+          const light = await findIterationByIdLight(iterationId);
+          iterationRow = light ? { errorMessage: light.errorMessage ?? undefined } : null;
+          responseError =
+            'Iteration data too large (Prisma 5MB limit). Use smaller task assets (e.g. URLs instead of base64) or increase the limit in Prisma Console.';
+        } else {
+          throw err;
+        }
+      }
+    }
+
+    const it = iterationRow;
     const statusResponse: StatusResponse = {
       iterationId,
       status: it?.errorMessage ? 'error' : it?.candidatesJson?.length ? 'pending' : 'generating',
-      error: it?.errorMessage,
+      error: responseError ?? it?.errorMessage,
       task: it?.taskJson as StatusResponse['task'],
       candidates: Array.isArray(it?.candidatesJson)
         ? (it.candidatesJson as Array<{ id: string; prompt: string }>)
@@ -245,6 +282,36 @@ export async function GET(
 
     return NextResponse.json(statusResponse);
   } catch (error) {
+    const errMsg = error instanceof Error ? error.message : String(error);
+    const isP6009Err =
+      errMsg.includes('P6009') || errMsg.includes('response size') || errMsg.includes('exceeded the the maximum of 5MB');
+    if (isP6009Err) {
+      try {
+        const light = await findIterationByIdLight(iterationId);
+        const runsLight = await prisma.run.findMany({
+          where: { iterationId },
+          select: { candidateId: true, status: true, error: true, latencyMs: true },
+          orderBy: { createdAt: 'asc' as const },
+        });
+        const allDone = runsLight.every((r) => r.status === 'done' || r.status === 'error');
+        return NextResponse.json({
+          iterationId,
+          status: light?.errorMessage ? 'error' : 'pending',
+          error:
+            'Response too large (Prisma 5MB limit). Run statuses below; use smaller task assets or increase limit in Prisma Console.',
+          runs: runsLight.map((r) => ({
+            candidateId: r.candidateId,
+            status: r.status as 'queued' | 'running' | 'done' | 'error',
+            latencyMs: r.latencyMs ?? undefined,
+            error: r.error ?? undefined,
+          })),
+          allDone,
+          hasErrors: runsLight.some((r) => r.status === 'error'),
+        } as StatusResponse);
+      } catch (fallbackErr) {
+        return handleApiError(fallbackErr, '/api/iterations/[id]/status');
+      }
+    }
     return handleApiError(error, '/api/iterations/[id]/status');
   }
 }

@@ -127,12 +127,14 @@ model ModelSpec {
 }
 
 model ResearchJob {
-  id             String        @id @default(uuid())
-  modelEndpointId String       @map("model_endpoint_id")
-  status         String        @default("queued") @db.VarChar(50) // "queued" | "running" | "done" | "error"
-  error          String?       @db.Text
-  startedAt      DateTime?     @map("started_at")
-  finishedAt     DateTime?     @map("finished_at")
+  id              String    @id @default(uuid())
+  modelEndpointId String    @map("model_endpoint_id")
+  status          String    @default("queued") @db.VarChar(50) // "queued" | "running" | "done" | "error"
+  error           String?   @db.Text
+  startedAt       DateTime? @map("started_at")
+  finishedAt      DateTime? @map("finished_at")
+  retryCount      Int       @default(0) @map("retry_count")
+  runAt           DateTime? @map("run_at") // when to run (for backoff); null = run asap
 
   // Relations
   modelEndpoint ModelEndpoint @relation(fields: [modelEndpointId], references: [id], onDelete: Cascade)
@@ -140,6 +142,7 @@ model ResearchJob {
   @@index([modelEndpointId])
   @@index([status])
   @@index([startedAt])
+  @@index([runAt])
   @@map("research_jobs")
 }
 
@@ -184,4 +187,16 @@ model Run {
   @@index([createdAt])
   @@unique([iterationId, candidateId])
   @@map("runs")
+}
+
+// Sprint 3: persistent rate limit (per-identifier sliding window)
+model RateLimitBucket {
+  id          String   @id @default(uuid())
+  identifier  String   @db.VarChar(255)
+  bucketTs    DateTime @map("bucket_ts")
+  count       Int      @default(0)
+
+  @@unique([identifier, bucketTs])
+  @@index([bucketTs])
+  @@map("rate_limit_buckets")
 }

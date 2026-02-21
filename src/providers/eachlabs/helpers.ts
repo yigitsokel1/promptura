@@ -5,6 +5,8 @@
 
 import type { EachLabsModelDetail } from './types';
 import type { FalAIModelMetadata } from '@/src/providers/falai/types';
+import type { RequiredAssets } from '@/src/core/modelSpec';
+import { analyzeSchemaForAssets } from '@/src/lib/schema-asset-analyzer';
 
 const EACHLABS_BASE = 'https://api.eachlabs.ai';
 
@@ -74,4 +76,49 @@ export function eachLabsModality(detail: EachLabsModelDetail): 'text' | 'image' 
   if (ot.includes('image') || ot === 'array') return 'image';
   if (ot.includes('video')) return 'video';
   return 'text';
+}
+
+/**
+ * Required input assets from EachLabs request_schema — thin wrapper only.
+ * Single authority: schema-asset-analyzer (allowlist + denylist); no provider-specific heuristic.
+ * Ensures T2I stays required_assets=none (image_size, num_images etc. are denylisted).
+ */
+export function eachLabsRequiredAssets(detail: EachLabsModelDetail): RequiredAssets {
+  const schema = detail.request_schema;
+  const propertyKeys =
+    schema?.properties && typeof schema.properties === 'object'
+      ? Object.keys(schema.properties)
+      : [];
+  const required =
+    Array.isArray(schema?.required) && schema.required.length > 0 ? schema.required : undefined;
+  return analyzeSchemaForAssets({ propertyKeys, required }).required_assets;
+}
+
+/** Known EachLabs API required params and defaults when schema has no default. Only for params we know. */
+const EACHLABS_KNOWN_INPUT_DEFAULTS: Record<string, unknown> = {
+  quality: 'high',
+  duration: 5,
+};
+
+/**
+ * Build required_input_defaults from EachLabs request_schema (validate/research time).
+ * For each required key: use schema.properties[key].default if set, else known fallback.
+ * Only includes keys we have a default for; other providers never use this.
+ */
+export function eachLabsRequiredInputDefaults(detail: EachLabsModelDetail): Record<string, unknown> {
+  const schema = detail.request_schema;
+  const required = Array.isArray(schema?.required) ? schema.required : [];
+  const properties = schema?.properties && typeof schema.properties === 'object' ? schema.properties : {};
+  const out: Record<string, unknown> = {};
+  for (const key of required) {
+    const prop = properties[key];
+    const defaultVal = prop && typeof prop === 'object' && 'default' in prop ? prop.default : undefined;
+    const fallback = EACHLABS_KNOWN_INPUT_DEFAULTS[key];
+    if (defaultVal !== undefined && defaultVal !== null) {
+      out[key] = defaultVal;
+    } else if (fallback !== undefined) {
+      out[key] = fallback;
+    }
+  }
+  return out;
 }

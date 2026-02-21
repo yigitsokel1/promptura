@@ -49,6 +49,10 @@ export default function Playground() {
   /** Task input assets for image-to-image, image-to-video, etc. (data URL or URL) */
   const [taskImageUrl, setTaskImageUrl] = useState<string>('');
   const [taskVideoUrl, setTaskVideoUrl] = useState<string>('');
+  /** Optional video URL (avoids size limit: provider fetches from URL instead of inline base64) */
+  const [taskVideoUrlLink, setTaskVideoUrlLink] = useState<string>('');
+  /** Video file over size limit: show warning and block use (limit ~700 KB so request body stays under 1 MB) */
+  const [videoFileOverLimit, setVideoFileOverLimit] = useState<boolean>(false);
   const modelsRef = useRef<ModelEndpointWithRelations[]>([]);
   const isInitialLoadRef = useRef(true);
   /** Tracks the iteration we're showing and polling for. Prevents late poll responses from overwriting a newer iteration. */
@@ -103,6 +107,8 @@ export default function Playground() {
   useEffect(() => {
     setTaskImageUrl('');
     setTaskVideoUrl('');
+    setTaskVideoUrlLink('');
+    setVideoFileOverLimit(false);
   }, [selectedModelId]);
 
   // Fetch models (including pending_research for polling)
@@ -146,7 +152,9 @@ export default function Playground() {
     return () => { cancelled = true; };
   }, []);
 
-  // Poll for model updates when there are pending research models (so list updates when research completes)
+  // Poll for model updates when there are pending research models (optimized: 4s interval)
+  const MODEL_POLL_INTERVAL_MS = 4000;
+  const MODEL_POLL_INITIAL_DELAY_MS = 3000;
   useEffect(() => {
     const hasPending = models.some(
       (m) =>
@@ -156,9 +164,8 @@ export default function Playground() {
     if (!hasPending) return;
 
     const poll = () => fetchModels();
-    // First refresh soon, then every 3s
-    const t1 = setTimeout(poll, 2000);
-    const t2 = setInterval(poll, 3000);
+    const t1 = setTimeout(poll, MODEL_POLL_INITIAL_DELAY_MS);
+    const t2 = setInterval(poll, MODEL_POLL_INTERVAL_MS);
     return () => {
       clearTimeout(t1);
       clearInterval(t2);
@@ -229,7 +236,9 @@ export default function Playground() {
     }
   }, []);
 
-  // Start/stop polling. Tied to iteration.id so only one iteration is polled; cleanup clears interval when iteration changes.
+  // Start/stop polling. Optimized: 3s interval to reduce load; stops when allDone or error.
+  const ITERATION_POLL_INTERVAL_MS = 3000;
+  const iterationId = iteration?.id ?? null;
   useEffect(() => {
     if (!iteration) return;
 
@@ -237,11 +246,11 @@ export default function Playground() {
     if (iterationStatus?.status === 'error') return;
     if (error && error.includes('Failed to fetch status')) return;
 
-    const iterationId = iteration.id;
+    const id = iteration.id;
 
     const runPoll = () => {
-      if (activeIterationIdRef.current !== iterationId) return;
-      pollIterationStatus(iterationId).catch((err) => {
+      if (activeIterationIdRef.current !== id) return;
+      pollIterationStatus(id).catch((err) => {
         console.error('Polling failed:', err);
         clearInterval(intervalId);
       });
@@ -249,10 +258,10 @@ export default function Playground() {
 
     runPoll();
 
-    const intervalId = setInterval(runPoll, 2000);
+    const intervalId = setInterval(runPoll, ITERATION_POLL_INTERVAL_MS);
 
     return () => clearInterval(intervalId);
-  }, [iteration?.id ?? null, iterationStatus, pollIterationStatus, error ?? null]);
+  }, [iteration, iterationId, iterationStatus, pollIterationStatus, error]);
 
   const handleAddModel = async () => {
     const endpointId = customEndpointId.trim();
@@ -336,7 +345,10 @@ export default function Playground() {
 
     try {
       const assets: TaskSpec['assets'] = [];
-      if (taskVideoUrl.trim()) assets.push({ type: 'video', url: taskVideoUrl.trim() });
+      const videoUrl = taskVideoUrlLink.trim() && /^https?:\/\//i.test(taskVideoUrlLink.trim())
+        ? taskVideoUrlLink.trim()
+        : taskVideoUrl.trim();
+      if (videoUrl) assets.push({ type: 'video', url: videoUrl });
 
       const task: TaskSpec = {
         goal: taskGoal.trim(),
@@ -638,11 +650,14 @@ export default function Playground() {
                         const latestJob = model.researchJobs?.[0];
                         const jobStatus = latestJob?.status;
                         const isResearching = model.status === 'pending_research' || ['queued', 'running'].includes(jobStatus ?? '');
+                        const modalityLabel = isResearching
+                          ? 'Researching…'
+                          : model.modelSpecs?.length
+                            ? (model.modelSpecs[0].specJson as { modality?: string })?.modality ?? '—'
+                            : '[No spec]';
                         return (
                           <option key={model.id} value={model.id}>
-                            {model.endpointId} — {mapModalityFromModel(model)}
-                            {isResearching && ' [Researching...]'}
-                            {model.status === 'active' && model.modelSpecs.length === 0 && ' [No Spec]'}
+                            {model.endpointId} — {modalityLabel}
                           </option>
                         );
                       })}
@@ -810,36 +825,70 @@ export default function Playground() {
                     </div>
                   )}
 
-                  {/* Video upload: only when model requires video (required_assets) */}
+                  {/* Video: URL (no size limit) or file upload (max ~700 KB; provider rejects larger) */}
                   {reqVideo && (
-                    <div>
-                      <label className="block text-sm font-medium text-zinc-700 dark:text-zinc-300">
-                        Input video <span className="ml-1 text-red-500">*</span>
-                      </label>
-                      <input
-                        type="file"
-                        accept="video/*"
-                        onChange={(e) => {
-                          const f = e.target.files?.[0];
-                          if (f) {
-                            const r = new FileReader();
-                            r.onload = () => setTaskVideoUrl(String(r.result));
-                            r.readAsDataURL(f);
-                          } else {
-                            setTaskVideoUrl('');
-                          }
-                        }}
-                        className="mt-1 block w-full text-sm text-zinc-600 file:mr-3 file:rounded-md file:border-0 file:bg-zinc-100 file:px-4 file:py-2 file:text-sm file:font-medium file:text-zinc-700 hover:file:bg-zinc-200 dark:file:bg-zinc-700 dark:file:text-zinc-300"
-                      />
-                      {taskVideoUrl && (
-                        <button
-                          type="button"
-                          onClick={() => setTaskVideoUrl('')}
-                          className="mt-1 text-xs text-zinc-500 hover:text-zinc-700 dark:hover:text-zinc-400"
-                        >
-                          Clear
-                        </button>
-                      )}
+                    <div className="space-y-3">
+                      <div>
+                        <label className="block text-sm font-medium text-zinc-700 dark:text-zinc-300">
+                          Input video <span className="ml-1 text-red-500">*</span>
+                        </label>
+                        <p className="mt-1 text-xs text-zinc-500 dark:text-zinc-400">
+                          Paste a public video URL (recommended), or upload a file (max 700 KB — EachLabs queue limit).
+                        </p>
+                        <input
+                          type="url"
+                          value={taskVideoUrlLink}
+                          onChange={(e) => {
+                            setTaskVideoUrlLink(e.target.value);
+                            setVideoFileOverLimit(false);
+                          }}
+                          placeholder="https://… (recommended for large videos)"
+                          className="mt-1 block w-full rounded-md border border-zinc-300 px-3 py-2 text-sm focus:border-zinc-500 focus:outline-none focus:ring-zinc-500 dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-50"
+                        />
+                      </div>
+                      <div>
+                        <label className="block text-sm font-medium text-zinc-500 dark:text-zinc-400">
+                          Or upload file (max 700 KB)
+                        </label>
+                        <input
+                          type="file"
+                          accept="video/*"
+                          onChange={(e) => {
+                            const f = e.target.files?.[0];
+                            if (f) {
+                              const VIDEO_MAX_BYTES = 700 * 1024; // 700 KB — keeps request body under provider ~1 MB limit
+                              if (f.size > VIDEO_MAX_BYTES) {
+                                setVideoFileOverLimit(true);
+                                setTaskVideoUrl('');
+                                e.target.value = '';
+                              } else {
+                                setVideoFileOverLimit(false);
+                                const r = new FileReader();
+                                r.onload = () => setTaskVideoUrl(String(r.result));
+                                r.readAsDataURL(f);
+                              }
+                            } else {
+                              setTaskVideoUrl('');
+                              setVideoFileOverLimit(false);
+                            }
+                          }}
+                          className="mt-1 block w-full text-sm text-zinc-600 file:mr-3 file:rounded-md file:border-0 file:bg-zinc-100 file:px-4 file:py-2 file:text-sm file:font-medium file:text-zinc-700 hover:file:bg-zinc-200 dark:file:bg-zinc-700 dark:file:text-zinc-300"
+                        />
+                        {videoFileOverLimit && (
+                          <p className="mt-2 text-sm text-amber-600 dark:text-amber-400">
+                            File exceeds the 700 KB limit (EachLabs queue limit). Use a video URL above or a very short clip.
+                          </p>
+                        )}
+                        {taskVideoUrl && !videoFileOverLimit && (
+                          <button
+                            type="button"
+                            onClick={() => setTaskVideoUrl('')}
+                            className="mt-1 text-xs text-zinc-500 hover:text-zinc-700 dark:hover:text-zinc-400"
+                          >
+                            Clear
+                          </button>
+                        )}
+                      </div>
                     </div>
                   )}
                 </>
@@ -865,21 +914,37 @@ export default function Playground() {
                 );
               }
 
+              const spec = selectedModel?.modelSpecs?.[0]?.specJson as { required_assets?: string } | undefined;
+              const r = spec?.required_assets ?? 'none';
+              const requiredLabels: string[] = ['Prompt'];
+              if (r === 'image' || r === 'image+video') requiredLabels.push('Image');
+              if (r === 'video' || r === 'image+video') requiredLabels.push('Video');
+
               return (
-                <div>
-                  <label className="block text-sm font-medium text-zinc-700 dark:text-zinc-300">
-                    Modality
-                  </label>
-                  <div className="mt-1 rounded-md border border-zinc-300 bg-zinc-50 px-3 py-2 text-sm text-zinc-600 dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-400">
-                    {taskModality.replace(/-/g, ' ').replace(/\b\w/g, (l) => l.toUpperCase())}
+                <div className="space-y-3">
+                  <div>
+                    <label className="block text-sm font-medium text-zinc-700 dark:text-zinc-300">
+                      Modality
+                    </label>
+                    <div className="mt-1 rounded-md border border-zinc-300 bg-zinc-50 px-3 py-2 text-sm text-zinc-600 dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-400">
+                      {taskModality.replace(/-/g, ' ').replace(/\b\w/g, (l) => l.toUpperCase())}
+                    </div>
+                    <p className="mt-1 text-xs text-zinc-500 dark:text-zinc-400">
+                      {hasSpec
+                        ? 'From model spec'
+                        : isPendingResearch
+                          ? 'From provider (research in progress; full spec when ready)'
+                          : 'From provider catalog (ModelSpec not yet available)'}
+                    </p>
                   </div>
-                  <p className="mt-1 text-xs text-zinc-500 dark:text-zinc-400">
-                    {hasSpec
-                      ? 'From model spec'
-                      : isPendingResearch
-                        ? 'From provider (research in progress; full spec when ready)'
-                        : 'From provider catalog (ModelSpec not yet available)'}
-                  </p>
+                  <div>
+                    <label className="block text-sm font-medium text-zinc-700 dark:text-zinc-300">
+                      Required inputs
+                    </label>
+                    <div className="mt-1 rounded-md border border-zinc-300 bg-zinc-50 px-3 py-2 text-sm text-zinc-600 dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-400">
+                      {requiredLabels.join(' + ')}
+                    </div>
+                  </div>
                 </div>
               );
             })()}
@@ -896,7 +961,10 @@ export default function Playground() {
                   const m = models.find((x) => x.id === selectedModelId);
                   if (!m) return false;
                   if (requiresImageInput(m) && !taskImageUrl.trim()) return true;
-                  if (requiresVideoInput(m) && !taskVideoUrl.trim()) return true;
+                  if (requiresVideoInput(m)) {
+                    const hasLink = taskVideoUrlLink.trim() && /^https?:\/\//i.test(taskVideoUrlLink.trim());
+                    if (!hasLink && !taskVideoUrl.trim()) return true;
+                  }
                   return false;
                 })())
               )}

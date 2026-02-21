@@ -3,7 +3,7 @@
  *
  * Payload contains only:
  * - prompt
- * - image_url (when required_assets needs image)
+ * - image_url and image_urls (when required_assets needs image; some APIs require image_urls array)
  * - video_url (when required_assets needs video)
  *
  * No params → providers use their defaults. Missing required asset → clear error.
@@ -64,6 +64,7 @@ export function buildExecutionPayload(
       throw new Error('Image required.');
     }
     payload.image_url = url;
+    payload.image_urls = [url];
   }
 
   if (modelSpecNeedsVideo(modelSpec)) {

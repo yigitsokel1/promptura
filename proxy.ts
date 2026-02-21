@@ -1,11 +1,11 @@
 /**
- * Blok A: Route protection
+ * Blok A: Route protection (Next.js proxy convention, formerly middleware)
  * - /admin/* → ADMIN only (from DB)
  * - /settings/*, /playground → login required
  */
 import { auth } from '@/auth';
 
-export default auth((req) => {
+const proxy = auth((req) => {
   const { pathname } = req.nextUrl;
   const session = req.auth;
   const isLoggedIn = !!session?.user;
@@ -40,6 +40,8 @@ export default auth((req) => {
 
   return;
 });
+
+export default proxy;
 
 export const config = {
   matcher: [

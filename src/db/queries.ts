@@ -254,6 +254,17 @@ export async function findIterationById(iterationId: string): Promise<IterationR
   return row as IterationRecord | null;
 }
 
+/** Lightweight iteration fetch (no taskJson/candidatesJson) to avoid Prisma P6009 response size limit. */
+export async function findIterationByIdLight(
+  iterationId: string
+): Promise<{ id: string; userId: string | null; errorMessage: string | null; startedAt: Date; finishedAt: Date | null } | null> {
+  const row = await prisma.iteration.findUnique({
+    where: { id: iterationId },
+    select: { id: true, userId: true, errorMessage: true, startedAt: true, finishedAt: true },
+  });
+  return row;
+}
+
 export async function findIterationsRecent(options?: { take?: number }): Promise<IterationRecord[]> {
   const rows = await prisma.iteration.findMany({
     orderBy: { startedAt: 'desc' },

@@ -10,7 +10,7 @@ import {
 } from '@/src/providers/eachlabs/helpers';
 import { prisma } from '@/src/db/client';
 import { handleApiError } from '@/src/lib/api-helpers';
-import { runResearchJob } from '@/src/lib/research-helpers';
+import { runResearchJob, startResearchQueueTicker } from '@/src/lib/research-helpers';
 import { requireAuth, unauthorizedResponse } from '@/src/lib/auth';
 
 type SourceSlug = 'fal.ai' | 'eachlabs';
@@ -88,7 +88,7 @@ export async function POST(request: NextRequest) {
     }
 
     let kind: 'model' | 'workflow' = 'model';
-    let modality: 'text' | 'image' | 'video' = 'text';
+    let modality: string = 'text-to-text';
     let provider: string = source === 'eachlabs' ? 'eachlabs' : 'falai';
 
     if (source === 'eachlabs') {
@@ -163,7 +163,7 @@ export async function POST(request: NextRequest) {
       },
     });
 
-    // Run research in same process (no HTTP), so no auth/session issue
+    startResearchQueueTicker();
     const jobId = researchJob.id;
     setImmediate(() => {
       runResearchJob(jobId).catch((err) => {
