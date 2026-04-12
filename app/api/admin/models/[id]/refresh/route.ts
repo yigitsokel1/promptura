@@ -1,17 +1,16 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { prisma } from '@/src/db/client';
-import { createFalAIClientFromEnv, determineModalityFromCategory } from '@/src/providers/falai/helpers';
+import { createFalAIClientFromEnv } from '@/src/providers/falai/helpers';
 import {
   findEachLabsModel,
   eachLabsDetailToFalMetadata,
 } from '@/src/providers/eachlabs/helpers';
 import { researchModelWithGemini } from '@/src/providers/gemini/helpers';
 import type { FalAIModelMetadata } from '@/src/providers/falai/types';
-import type { Modality } from '@/src/core/types';
-import type { ModelSpec, RequiredAssets } from '@/src/core/modelSpec';
+import type { ModelSpec } from '@/src/core/modelSpec';
 import { Prisma } from '@prisma/client';
 import { handleApiError } from '@/src/lib/api-helpers';
-import { updateResearchJobError } from '@/src/lib/research-helpers';
+import { deriveModalityAndAssets } from '@/src/lib/research-helpers';
 import { requireAdmin, unauthorizedResponse } from '@/src/lib/auth';
 
 /**
@@ -57,16 +56,17 @@ export async function POST(
     try {
       let modelMetadata: FalAIModelMetadata;
       let category: string | undefined;
+      let eachLabsDetail: Awaited<ReturnType<typeof findEachLabsModel>> | null = null;
 
       if (modelEndpoint.source === 'eachlabs') {
-        const detail = await findEachLabsModel(modelEndpoint.endpointId);
-        if (!detail) {
+        eachLabsDetail = await findEachLabsModel(modelEndpoint.endpointId);
+        if (!eachLabsDetail) {
           throw new Error(
             `Model not found in EachLabs: ${modelEndpoint.endpointId}`
           );
         }
-        modelMetadata = eachLabsDetailToFalMetadata(detail);
-        category = detail.output_type;
+        modelMetadata = eachLabsDetailToFalMetadata(eachLabsDetail);
+        category = eachLabsDetail.output_type;
       } else {
         const falClient = createFalAIClientFromEnv();
         const falMetadata = await falClient.findModel(modelEndpoint.endpointId);
@@ -79,25 +79,35 @@ export async function POST(
         category = falMetadata.metadata?.category;
       }
 
-      const raw = determineModalityFromCategory(category) ?? modelEndpoint.modality?.toLowerCase() ?? 'text';
-      const modality: Modality = raw === 'video' ? 'text-to-video' : raw === 'image' ? 'text-to-image' : 'text-to-text';
-      const required_assets: RequiredAssets = 'none';
+      // Derive modality, required_assets, and detected_input_fields from schema
+      const derived = await deriveModalityAndAssets({
+        source: modelEndpoint.source === 'eachlabs' ? 'eachlabs' : 'fal.ai',
+        dbModality: modelEndpoint.modality,
+        category,
+        eachLabsDetail: eachLabsDetail ?? undefined,
+        endpointId: modelEndpoint.endpointId,
+      });
 
       // Gemini: guidelines + summary only (never modality/required_assets/params)
       const guidelines = await researchModelWithGemini(
         modelMetadata,
         modelEndpoint.kind as 'model' | 'workflow',
-        modality
+        derived.modality
       );
 
       const modelSpec: ModelSpec = {
-        modality,
-        required_assets,
+        modality: derived.modality,
+        required_assets: derived.required_assets,
         prompt_guidelines: guidelines.prompt_guidelines,
         summary: guidelines.summary,
+        ...(derived.detected_input_fields.length > 0 && {
+          detected_input_fields: derived.detected_input_fields,
+        }),
       };
 
-      const specJson: Prisma.InputJsonValue = JSON.parse(JSON.stringify(modelSpec));
+      // Store modality_debug alongside spec in JSON (not part of ModelSpec type, but useful for admin debugging)
+      const specWithDebug = { ...modelSpec, modality_debug: derived.modalityDebug };
+      const specJson: Prisma.InputJsonValue = JSON.parse(JSON.stringify(specWithDebug));
 
       // Delete old specs and create new one (overwrite)
       await prisma.modelSpec.deleteMany({
@@ -131,14 +141,57 @@ export async function POST(
         },
       });
 
+      // Clean up stuck runs and iterations for this model (queued/running that will never complete)
+      const cleanedRuns = await prisma.run.updateMany({
+        where: {
+          modelEndpointId: modelEndpoint.id,
+          status: { in: ['queued', 'running'] },
+        },
+        data: {
+          status: 'error',
+          error: 'Cleaned up during model refresh — spec was outdated. Please start a new generation.',
+        },
+      });
+      // Mark iterations with all-error/done runs as no longer generating
+      if (cleanedRuns.count > 0) {
+        // Find iterations for this model that are still "generating" or have no finishedAt
+        const stuckIterations = await prisma.iteration.findMany({
+          where: {
+            modelEndpointId: modelEndpoint.id,
+            finishedAt: null,
+          },
+          select: { id: true },
+        });
+        for (const it of stuckIterations) {
+          const pendingCount = await prisma.run.count({
+            where: { iterationId: it.id, status: { in: ['queued', 'running'] } },
+          });
+          if (pendingCount === 0) {
+            await prisma.iteration.update({
+              where: { id: it.id },
+              data: { finishedAt: new Date() },
+            }).catch(() => {});
+          }
+        }
+        console.log(`[Refresh] Cleaned ${cleanedRuns.count} stuck runs for ${modelEndpoint.endpointId}`);
+      }
+
       return NextResponse.json({
         success: true,
         researchJobId: researchJob.id,
-        message: 'Research refreshed successfully',
+        message: `Research refreshed successfully${cleanedRuns.count > 0 ? ` (cleaned ${cleanedRuns.count} stuck runs)` : ''}`,
       });
     } catch (error) {
-      // Update job status to error
-      await updateResearchJobError(researchJob.id, error);
+      // Admin refresh: mark as error immediately (no retry queue)
+      const errorMessage = error instanceof Error ? error.message : 'Unknown error';
+      await prisma.researchJob.update({
+        where: { id: researchJob.id },
+        data: {
+          status: 'error',
+          error: errorMessage,
+          finishedAt: new Date(),
+        },
+      }).catch(() => {});
 
       throw error;
     }

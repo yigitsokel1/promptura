@@ -188,6 +188,7 @@ The admin panel (`/admin/models`) provides model management capabilities:
 - **Research Refresh**: Trigger new research jobs to regenerate model specs
   - Overwrites existing specs with fresh Gemini analysis
   - Useful when model documentation is updated or improved
+- **Delete model**: Remove an endpoint from the catalog; related specs, research jobs, and runs are removed via database cascade
 
 **Important**: The admin panel never writes prompts. It only manages model metadata and research jobs. Prompt generation happens in the Playground based on user tasks.
 

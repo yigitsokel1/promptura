@@ -45,7 +45,7 @@ export interface ModalityDerivationDebug {
  * Derive modality + required_assets + detected_input_fields via schema-asset-analyzer.
  * Returns debug info for admin "why did modality come out like this?".
  */
-async function deriveModalityAndAssets(params: {
+export async function deriveModalityAndAssets(params: {
   source: 'eachlabs' | 'fal.ai';
   dbModality: string | null | undefined;
   category: string | undefined;
@@ -295,8 +295,7 @@ export async function runResearchJob(researchJobId: string): Promise<void> {
         : {}),
     };
 
-    const { detected_input_fields: _strip, ...specForDb } = modelSpec;
-    const specWithDebug = { ...specForDb, modality_debug: modalityDebug };
+    const specWithDebug = { ...modelSpec, modality_debug: modalityDebug };
     const specJson: Prisma.InputJsonValue = JSON.parse(JSON.stringify(specWithDebug));
     await prisma.modelSpec.create({
       data: {

@@ -3,8 +3,8 @@
  *
  * Payload contains only:
  * - prompt
- * - image_url and image_urls (when required_assets needs image; some APIs require image_urls array)
- * - video_url (when required_assets needs video)
+ * - image field (name from detected_input_fields, fallback image_url)
+ * - video field (name from detected_input_fields, fallback video_url)
  *
  * No params → providers use their defaults. Missing required asset → clear error.
  */
@@ -13,6 +13,7 @@ import type { ModelSpec } from '@/src/core/modelSpec';
 import { modelSpecNeedsImage, modelSpecNeedsVideo } from '@/src/core/modelSpec';
 import type { TaskAsset } from '@/src/core/types';
 import type { CandidatePromptInputAssets } from '@/src/core/types';
+import { isImageAssetKey, isVideoAssetKey } from '@/src/lib/modality-inference';
 
 export interface BuildExecutionPayloadInput {
   modelSpec: ModelSpec;
@@ -50,7 +51,38 @@ function resolveVideoUrl(
 }
 
 /**
- * Build minimal execution payload: prompt + image_url/video_url only when required_assets needs them.
+ * Find the actual field name for image input from detected_input_fields.
+ * Falls back to 'image_url' if no detected field.
+ */
+function resolveImageFieldName(detectedFields?: string[]): string {
+  if (detectedFields?.length) {
+    const imageField = detectedFields.find((f) => isImageAssetKey(f));
+    if (imageField) return imageField;
+  }
+  return 'image_url';
+}
+
+/**
+ * Find the actual field name for video input from detected_input_fields.
+ * Falls back to 'video_url' if no detected field.
+ */
+function resolveVideoFieldName(detectedFields?: string[]): string {
+  if (detectedFields?.length) {
+    const videoField = detectedFields.find((f) => isVideoAssetKey(f));
+    if (videoField) return videoField;
+  }
+  return 'video_url';
+}
+
+/**
+ * Determine if a field name expects an array value (e.g. image_urls, video_urls).
+ */
+function fieldExpectsArray(fieldName: string): boolean {
+  return fieldName.endsWith('_urls') || fieldName.endsWith('s_url');
+}
+
+/**
+ * Build minimal execution payload: prompt + image/video fields using correct field names per model.
  */
 export function buildExecutionPayload(
   input: BuildExecutionPayloadInput
@@ -63,8 +95,8 @@ export function buildExecutionPayload(
     if (url === undefined) {
       throw new Error('Image required.');
     }
-    payload.image_url = url;
-    payload.image_urls = [url];
+    const fieldName = resolveImageFieldName(modelSpec.detected_input_fields);
+    payload[fieldName] = fieldExpectsArray(fieldName) ? [url] : url;
   }
 
   if (modelSpecNeedsVideo(modelSpec)) {
@@ -72,7 +104,8 @@ export function buildExecutionPayload(
     if (url === undefined) {
       throw new Error('Video required.');
     }
-    payload.video_url = url;
+    const fieldName = resolveVideoFieldName(modelSpec.detected_input_fields);
+    payload[fieldName] = fieldExpectsArray(fieldName) ? [url] : url;
   }
 
   return payload;

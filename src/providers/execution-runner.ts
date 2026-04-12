@@ -78,9 +78,19 @@ export class ExecutionRunnerAdapter implements ProviderAdapter {
             modelSpec,
             taskInputs
           );
+
+          // Log payload keys for debugging (avoid dumping large values)
+          const payloadKeys = Object.keys(payload);
+          console.log(
+            `[ExecRunner] iterationId=${iterationId} ${endpointId} candidateId=${candidate.id} payload keys: [${payloadKeys.join(', ')}]`
+          );
+
           const requestId = await provider.submit(endpointId, payload, {
             requiredInputDefaults: modelSpec.required_input_defaults,
           });
+          console.log(
+            `[ExecRunner] iterationId=${iterationId} ${endpointId} candidateId=${candidate.id} submitted requestId=${requestId}`
+          );
 
           await updateRun(iterationId, candidate.id, {
             falRequestId: requestId,
@@ -90,6 +100,7 @@ export class ExecutionRunnerAdapter implements ProviderAdapter {
           return { candidateId: candidate.id, requestId };
         } catch (error) {
           const msg = error instanceof Error ? error.message : String(error);
+          console.error(`[ExecRunner] ${endpointId} candidateId=${candidate.id} submit failed:`, msg);
           await updateRun(iterationId, candidate.id, { status: 'error', error: msg });
           return { candidateId: candidate.id, requestId: null, error: msg };
         }

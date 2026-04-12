@@ -7,7 +7,7 @@ import { FalAIClient } from './client';
 import type { FalAIModelMetadata } from './types';
 import type { ModelSpec } from '@/src/core/modelSpec';
 import { modelSpecOutputType } from '@/src/core/modelSpec';
-import type { CandidatePrompt, OutputAsset } from '@/src/core/types';
+import type { CandidatePrompt, CandidatePromptInputAssets, OutputAsset, TaskAsset } from '@/src/core/types';
 import { buildExecutionPayload } from '@/src/lib/execution-payload';
 import { taskInputsToAssets } from '@/src/lib/task-assets';
 
@@ -40,6 +40,53 @@ export async function uploadFileToFalAI(
     ? `data:${contentType};base64,${fileData}`
     : `data:image/png;base64,${fileData}`;
   return await client.uploadFile(dataUri, contentType);
+}
+
+/**
+ * If URL is already https, return as-is. Otherwise upload to fal (data URI / raw base64) and cache by source string.
+ */
+async function ensureFalHostedMediaUrl(
+  url: string,
+  client: FalAIClient,
+  cache: Map<string, string>
+): Promise<string> {
+  if (url.startsWith('http://') || url.startsWith('https://')) {
+    return url;
+  }
+  const cached = cache.get(url);
+  if (cached) return cached;
+  const hosted = await uploadFileToFalAI(client, url);
+  cache.set(url, hosted);
+  return hosted;
+}
+
+async function resolveTaskAssetsToFalUrls(
+  assets: TaskAsset[],
+  client: FalAIClient,
+  cache: Map<string, string>
+): Promise<TaskAsset[]> {
+  return Promise.all(
+    assets.map(async (a) => ({
+      ...a,
+      url: await ensureFalHostedMediaUrl(a.url, client, cache),
+    }))
+  );
+}
+
+async function resolveInputAssetsToFalUrls(
+  input: CandidatePromptInputAssets | undefined,
+  client: FalAIClient,
+  cache: Map<string, string>
+): Promise<CandidatePromptInputAssets | undefined> {
+  if (!input) return undefined;
+  const out: CandidatePromptInputAssets = { ...input };
+  for (const key of Object.keys(out)) {
+    const v = out[key];
+    if (typeof v !== 'string' || v.length === 0) continue;
+    if (v.startsWith('http://') || v.startsWith('https://')) continue;
+    out[key] = await ensureFalHostedMediaUrl(v, client, cache);
+  }
+  return out;
 }
 
 /**
@@ -266,14 +313,22 @@ export async function buildFalAIPayload(
     assets?: Array<{ type: 'image' | 'video'; url: string }>;
     _uploadCache?: Map<string, string>;
   },
-  _client?: FalAIClient
+  client?: FalAIClient
 ): Promise<Record<string, unknown>> {
-  const taskAssets = taskInputsToAssets(taskInputs);
+  const cache = taskInputs?._uploadCache ?? new Map<string, string>();
+  let taskAssets = taskInputsToAssets(taskInputs);
+  let inputAssets = candidate.inputAssets;
+
+  if (client) {
+    taskAssets = await resolveTaskAssetsToFalUrls(taskAssets, client, cache);
+    inputAssets = await resolveInputAssetsToFalUrls(inputAssets, client, cache);
+  }
+
   const payload = buildExecutionPayload({
     modelSpec,
     prompt: candidate.prompt,
     taskAssets,
-    inputAssets: candidate.inputAssets,
+    inputAssets,
   });
   const defaults = modelSpec.required_input_defaults;
   if (defaults && Object.keys(defaults).length > 0) {
@@ -317,6 +372,18 @@ export function convertFalAIOutputToOutputAssets(
   if (outputType === 'image') {
     const toImageAssets = (urls: string[]): OutputAsset[] =>
       urls.map((url) => ({ type: 'image' as const, url }));
+
+    if (typeof falOutput === 'object' && falOutput !== null && !Array.isArray(falOutput)) {
+      const top = falOutput as Record<string, unknown>;
+      const hasDirectImageFields =
+        'images' in top ||
+        'urls' in top ||
+        typeof top.image === 'string' ||
+        typeof top.url === 'string';
+      if (!hasDirectImageFields && top.output !== undefined && top.output !== null) {
+        return convertFalAIOutputToOutputAssets(top.output, modelSpec);
+      }
+    }
 
     const extractUrls = (): string[] | null => {
       if (typeof falOutput === 'string' && falOutput.trim().startsWith('http')) {

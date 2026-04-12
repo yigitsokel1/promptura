@@ -197,8 +197,9 @@ export class FalAIAdapter implements ProviderAdapter {
       const status = statusResponse.status;
 
       if (status === 'COMPLETED') {
-        // Get result
-        const result = await this.client.getQueueJobResult(modelId, requestId);
+        const result = await this.client.getQueueJobResult(modelId, requestId, {
+          responseUrl: statusResponse.response_url,
+        });
         
         if (result.error) {
           // Update Run with error
@@ -226,7 +227,9 @@ export class FalAIAdapter implements ProviderAdapter {
           },
         };
       } else if (status === 'FAILED') {
-        const result = await this.client.getQueueJobResult(modelId, requestId);
+        const result = await this.client.getQueueJobResult(modelId, requestId, {
+          responseUrl: statusResponse.response_url,
+        });
         const errorMessage = result.error || 'Unknown error';
         
         // Update Run with error

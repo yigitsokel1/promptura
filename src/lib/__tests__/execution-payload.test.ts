@@ -19,7 +19,7 @@ function spec(overrides: Partial<ModelSpec>): ModelSpec {
 }
 
 describe('Task asset mapping (buildExecutionPayload)', () => {
-  it('maps task asset image to image_url when spec requires image', () => {
+  it('maps task asset image to image_url when spec requires image (default field)', () => {
     const taskAssets: TaskAsset[] = [{ type: 'image', url: IMAGE_URL }];
     const payload = buildExecutionPayload({
       modelSpec: spec({ modality: 'image-to-image', required_assets: 'image' }),
@@ -28,7 +28,66 @@ describe('Task asset mapping (buildExecutionPayload)', () => {
     });
     expect(payload.prompt).toBe('watercolor style');
     expect(payload.image_url).toBe(IMAGE_URL);
+  });
+
+  it('uses detected_input_fields to determine image field name', () => {
+    const taskAssets: TaskAsset[] = [{ type: 'image', url: IMAGE_URL }];
+    const payload = buildExecutionPayload({
+      modelSpec: spec({
+        modality: 'image-to-image',
+        required_assets: 'image',
+        detected_input_fields: ['image_urls'],
+      }),
+      prompt: 'edit background',
+      taskAssets,
+    });
+    expect(payload.prompt).toBe('edit background');
     expect(payload.image_urls).toEqual([IMAGE_URL]);
+    expect(payload).not.toHaveProperty('image_url');
+  });
+
+  it('sends array for field names ending with _urls', () => {
+    const taskAssets: TaskAsset[] = [{ type: 'image', url: IMAGE_URL }];
+    const payload = buildExecutionPayload({
+      modelSpec: spec({
+        modality: 'image-to-image',
+        required_assets: 'image',
+        detected_input_fields: ['image_urls'],
+      }),
+      prompt: 'test',
+      taskAssets,
+    });
+    expect(Array.isArray(payload.image_urls)).toBe(true);
+    expect(payload.image_urls).toEqual([IMAGE_URL]);
+  });
+
+  it('sends string for singular field names like image_url', () => {
+    const taskAssets: TaskAsset[] = [{ type: 'image', url: IMAGE_URL }];
+    const payload = buildExecutionPayload({
+      modelSpec: spec({
+        modality: 'image-to-image',
+        required_assets: 'image',
+        detected_input_fields: ['image_url'],
+      }),
+      prompt: 'test',
+      taskAssets,
+    });
+    expect(typeof payload.image_url).toBe('string');
+    expect(payload.image_url).toBe(IMAGE_URL);
+  });
+
+  it('falls back to image_url when no detected_input_fields', () => {
+    const taskAssets: TaskAsset[] = [{ type: 'image', url: IMAGE_URL }];
+    const payload = buildExecutionPayload({
+      modelSpec: spec({
+        modality: 'image-to-image',
+        required_assets: 'image',
+        // no detected_input_fields
+      }),
+      prompt: 'test',
+      taskAssets,
+    });
+    expect(payload.image_url).toBe(IMAGE_URL);
   });
 
   it('maps task asset video to video_url when spec requires video', () => {

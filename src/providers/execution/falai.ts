@@ -17,7 +17,35 @@ const STATUS_MAP: Record<FalAIQueueStatus, 'queued' | 'running' | 'completed' | 
   FAILED: 'failed',
 };
 
+const FAL_QUEUE_STATUSES = new Set<string>(Object.keys(STATUS_MAP));
+
+/**
+ * Map fal queue API status to execution poll status.
+ * Unknown or empty values become `failed` so polls do not spin until stale timeout.
+ */
+function mapFalQueueStatusToExecution(
+  falStatus: string | undefined,
+  context: { endpointId: string; requestId: string; phase: 'poll' | 'result' }
+): 'queued' | 'running' | 'completed' | 'failed' {
+  if (falStatus === undefined || falStatus === '') {
+    console.warn(
+      `[FalAIExec] Empty queue status endpoint=${context.endpointId} requestId=${context.requestId} phase=${context.phase}`
+    );
+    return 'failed';
+  }
+  if (!FAL_QUEUE_STATUSES.has(falStatus)) {
+    console.warn(
+      `[FalAIExec] Unmapped queue status raw=${JSON.stringify(falStatus)} endpoint=${context.endpointId} requestId=${context.requestId} phase=${context.phase}`
+    );
+    return 'failed';
+  }
+  return STATUS_MAP[falStatus as FalAIQueueStatus];
+}
+
 export class FalAIExecutionProvider implements ExecutionProvider {
+  /** From last status poll: fal's `response_url` for fetching the result body (parallel runs keyed by request id). */
+  private falResultUrlByRequestId = new Map<string, string>();
+
   constructor(private client: FalAIClient) {}
 
   async buildPayload(
@@ -38,15 +66,35 @@ export class FalAIExecutionProvider implements ExecutionProvider {
 
   async getStatus(endpointId: string, requestId: string): Promise<'queued' | 'running' | 'completed' | 'failed'> {
     const res = await this.client.getQueueJobStatus(endpointId, requestId);
-    return STATUS_MAP[res.status] ?? 'running';
+    const falStatus = res.status as string;
+    if (
+      (falStatus === 'COMPLETED' || falStatus === 'FAILED') &&
+      typeof res.response_url === 'string' &&
+      res.response_url.length > 0
+    ) {
+      this.falResultUrlByRequestId.set(requestId, res.response_url);
+    }
+    return mapFalQueueStatusToExecution(falStatus, {
+      endpointId,
+      requestId,
+      phase: 'poll',
+    });
   }
 
   async getResult(
     endpointId: string,
     requestId: string
   ): Promise<ExecutionResult & { status: 'queued' | 'running' | 'completed' | 'failed' }> {
-    const result = await this.client.getQueueJobResult(endpointId, requestId);
-    const status = STATUS_MAP[result.status] ?? 'running';
+    const responseUrl = this.falResultUrlByRequestId.get(requestId);
+    if (responseUrl !== undefined) {
+      this.falResultUrlByRequestId.delete(requestId);
+    }
+    const result = await this.client.getQueueJobResult(endpointId, requestId, { responseUrl });
+    const status = mapFalQueueStatusToExecution(result.status as string, {
+      endpointId,
+      requestId,
+      phase: 'result',
+    });
     return {
       status,
       output: result.output,

@@ -18,6 +18,38 @@ import { requireAuth, unauthorizedResponse } from '@/src/lib/auth';
 /** Iteration IDs that already hit P6009 (response >5MB); skip heavy fetch on subsequent polls to avoid log spam. */
 const iterationIdsOverSizeLimit = new Set<string>();
 
+/** Stale timeout for runs that were submitted (have falRequestId) but never completed. */
+const STALE_RUNNING_MS = 5 * 60 * 1000;
+/** Stale timeout for runs stuck in queued (no falRequestId — submission never happened). */
+const STALE_QUEUED_MS = 3 * 60 * 1000;
+
+/** Track consecutive transient poll errors per run ID. After threshold, mark as permanent error. */
+const transientErrorCounts = new Map<string, number>();
+const MAX_TRANSIENT_RETRIES = 5;
+
+/** User-visible hint when fal returns 403 / Forbidden during status poll. */
+function formatFalPollErrorMessage(message: string): string {
+  const m = message.trim();
+  if (m === 'Forbidden' || m.includes('403') || m.toLowerCase().includes('forbidden')) {
+    return `${m} — Check your fal.ai API key in Settings (Model API access). Status polling must use the same key as submit.`;
+  }
+  return m;
+}
+
+/**
+ * True when the error should mark the run failed (not retried next poll).
+ * limitConcurrencySettled swallows thrown errors — never rethrow from the poll worker.
+ */
+function isPermanentProviderPollError(message: string): boolean {
+  if (/422|Unprocessable Entity/i.test(message)) return true;
+  if (/429|Too Many Requests|rate limit/i.test(message)) return false;
+  if (/403|401|404|Forbidden|Not Found|not found|invalid request|Invalid request id|Fal\.ai API error: 4\d\d/i.test(message))
+    return true;
+  if (/GraphQL|ECONNREFUSED|ETIMEDOUT|fetch failed|network|socket/i.test(message)) return false;
+  if (/5\d\d/.test(message)) return false;
+  return false;
+}
+
 interface StatusResponse {
   iterationId: string;
   status: 'generating' | 'pending' | 'error';
@@ -55,7 +87,14 @@ export async function GET(
     // Ensure iteration belongs to current user (use light query to avoid P6009 on large taskJson)
     const iterationRecord = await findIterationByIdLight(iterationId);
     if (iterationRecord?.userId && iterationRecord.userId !== session.user.id) {
-      return NextResponse.json({ error: 'Forbidden' }, { status: 403 });
+      return NextResponse.json(
+        {
+          error:
+            'This iteration belongs to another account. Sign in as the user who started the run, or start a new generation.',
+          code: 'IterationForbidden',
+        },
+        { status: 403 }
+      );
     }
 
     // Fetch runs from DB (with ModelEndpoint relation for endpointId and ModelSpec)
@@ -87,6 +126,34 @@ export async function GET(
         }
       }
 
+      const nowMs = Date.now();
+      const staleQueued = runs.filter(
+        (r) => r.status === 'queued' && !r.falRequestId && nowMs - r.createdAt.getTime() > STALE_QUEUED_MS
+      );
+      for (const r of staleQueued) {
+        await updateRun(iterationId, r.candidateId, {
+          status: 'error',
+          error:
+            'Never reached the provider (stuck in queued). Background submit may not have run, failed before queue, or timed out. Check server logs, provider keys, and try generating again.',
+        });
+      }
+      if (staleQueued.length > 0) {
+        runs = await prisma.run.findMany({
+          where: { iterationId },
+          include: {
+            modelEndpoint: {
+              include: {
+                modelSpecs: {
+                  orderBy: { researchedAt: 'desc' },
+                  take: 1,
+                },
+              },
+            },
+          },
+          orderBy: { createdAt: 'asc' },
+        });
+      }
+
       // Check status of "running" runs (Blok C: use ExecutionProvider from factory)
       const runningRuns = runs.filter((run) => run.status === 'running' && run.falRequestId && run.modelEndpoint);
       if (runningRuns.length > 0) {
@@ -115,7 +182,18 @@ export async function GET(
             try {
               const endpointId = run.modelEndpoint!.endpointId;
               const requestId = run.falRequestId!;
+              const runningAgeMs = Date.now() - run.createdAt.getTime();
+              if (runningAgeMs > STALE_RUNNING_MS) {
+                await updateRun(iterationId, run.candidateId, {
+                  status: 'error',
+                  error: `Timed out waiting for provider (${Math.round(STALE_RUNNING_MS / 60000)} min). Check your provider dashboard or try again.`,
+                });
+                return;
+              }
               const status = await executionProvider.getStatus(endpointId, requestId);
+
+              // Reset transient error counter on successful poll
+              transientErrorCounts.delete(run.id);
 
               if (status === 'completed' || status === 'failed') {
                 const result = await executionProvider.getResult(endpointId, requestId);
@@ -147,6 +225,12 @@ export async function GET(
                     outputJson: { assets },
                     latencyMs: Date.now() - run.createdAt.getTime(),
                   });
+                } else {
+                  await updateRun(iterationId, run.candidateId, {
+                    status: 'error',
+                    error:
+                      'Job reported completed but no output was returned. If this persists, check the model on fal.ai or try a smaller input image (upload uses fal file storage).',
+                  });
                 }
               }
             } catch (error) {
@@ -170,7 +254,25 @@ export async function GET(
                 await updateRun(iterationId, run.candidateId, { status: 'error', error: detailedError });
                 return;
               }
-              throw error;
+              if (isPermanentProviderPollError(errorMessage)) {
+                await updateRun(iterationId, run.candidateId, {
+                  status: 'error',
+                  error: formatFalPollErrorMessage(errorMessage),
+                });
+                return;
+              }
+              // Transient error: track count, escalate after threshold
+              const count = (transientErrorCounts.get(run.id) ?? 0) + 1;
+              transientErrorCounts.set(run.id, count);
+              console.warn(`[Status] Transient error for run ${run.id} (${count}/${MAX_TRANSIENT_RETRIES}): ${errorMessage}`);
+              if (count >= MAX_TRANSIENT_RETRIES) {
+                transientErrorCounts.delete(run.id);
+                await updateRun(iterationId, run.candidateId, {
+                  status: 'error',
+                  error: `Provider status check failed after ${count} attempts: ${formatFalPollErrorMessage(errorMessage)}. The job may still be running on the provider — check your dashboard.`,
+                });
+              }
+              return;
             }
           },
           CONCURRENCY

@@ -18,7 +18,7 @@ export interface ModelSpec {
   prompt_guidelines: string[];
   /** Optional summary of how the model works */
   summary?: string;
-  /** Debug: asset-related schema property names that contributed to required_assets (not persisted to DB). */
+  /** Asset-related schema property names that contributed to required_assets (e.g. ['image_urls']). Used at execution to send the correct field name. */
   detected_input_fields?: string[];
   /**
    * Provider-specific defaults for required input params (e.g. EachLabs quality, duration).

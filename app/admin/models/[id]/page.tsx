@@ -1,12 +1,13 @@
 'use client';
 
 import { useState, useEffect, useCallback } from 'react';
-import { useParams } from 'next/navigation';
+import { useParams, useRouter } from 'next/navigation';
 import Link from 'next/link';
 import type { ModelEndpointWithRelations } from '@/src/db/types';
 
 export default function AdminModelDetailPage() {
   const params = useParams();
+  const router = useRouter();
   const modelId = params.id as string;
 
   const [model, setModel] = useState<ModelEndpointWithRelations | null>(null);
@@ -14,6 +15,7 @@ export default function AdminModelDetailPage() {
   const [error, setError] = useState<string | null>(null);
   const [refreshing, setRefreshing] = useState(false);
   const [updatingStatus, setUpdatingStatus] = useState(false);
+  const [deleting, setDeleting] = useState(false);
 
   const fetchModel = useCallback(async () => {
     setLoading(true);
@@ -86,6 +88,36 @@ export default function AdminModelDetailPage() {
       setError(err instanceof Error ? err.message : 'An error occurred');
     } finally {
       setUpdatingStatus(false);
+    }
+  };
+
+  const handleDeleteModel = async () => {
+    if (!model) return;
+    if (
+      !confirm(
+        `Delete model "${model.endpointId}"? This removes the endpoint, its specs, research jobs, and runs. This cannot be undone.`
+      )
+    ) {
+      return;
+    }
+    setDeleting(true);
+    setError(null);
+    try {
+      const response = await fetch(`/api/admin/models/${modelId}`, { method: 'DELETE' });
+      if (response.status === 404) {
+        throw new Error('Model not found');
+      }
+      if (!response.ok) {
+        const errorData = await response.json().catch(() => ({}));
+        throw new Error(
+          typeof errorData.error === 'string' ? errorData.error : 'Failed to delete model'
+        );
+      }
+      router.push('/admin/models');
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'An error occurred');
+    } finally {
+      setDeleting(false);
     }
   };
 
@@ -253,6 +285,22 @@ export default function AdminModelDetailPage() {
                 <option value="disabled">Disabled</option>
                 <option value="pending_research">Pending Research</option>
               </select>
+            </div>
+          </div>
+
+          <div className="mt-6 border-t border-zinc-200 pt-4 dark:border-zinc-700">
+            <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+              <p className="text-xs leading-relaxed text-zinc-500 dark:text-zinc-400">
+                Remove this endpoint from the catalog. Related specs, research jobs, and runs are deleted.
+              </p>
+              <button
+                type="button"
+                onClick={handleDeleteModel}
+                disabled={deleting}
+                className="shrink-0 self-start rounded-md px-2.5 py-1 text-xs font-medium text-red-600 transition-colors hover:bg-red-50 disabled:cursor-not-allowed disabled:opacity-50 dark:text-red-400 dark:hover:bg-red-950/30 sm:self-auto"
+              >
+                {deleting ? 'Deleting…' : 'Delete'}
+              </button>
             </div>
           </div>
         </div>

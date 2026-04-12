@@ -11,6 +11,7 @@ import {
   updateIterationWithCandidates,
   updateIterationError,
 } from '@/src/db/queries';
+import { prisma } from '@/src/db/client';
 import { handleApiError } from '@/src/lib/api-helpers';
 import { taskJsonForStorage } from '@/src/lib/task-assets';
 import { requireAuth, unauthorizedResponse } from '@/src/lib/auth';
@@ -252,17 +253,26 @@ export async function POST(request: NextRequest) {
           }))
         );
 
+        const tSubmit = Date.now();
         await runnerAdapter.runCandidates(task, targetModel, promptResult.candidates, {
           modelSpec,
           iterationId,
           modelEndpointId: modelEndpoint.id,
           submitOnly: true,
         });
+        console.log(
+          `[Generate] Background: runCandidates (submitOnly) finished in ${((Date.now() - tSubmit) / 1000).toFixed(1)}s iterationId=${iterationId} endpoint=${targetModel.modelId} candidates=${promptResult.candidates.length}`
+        );
         console.log(`[Generate] Background: jobs submitted for ${iterationId}`);
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
         console.error(`[Generate] Background failed for ${iterationId}:`, msg);
         await updateIterationError(iterationId, msg).catch(() => {});
+        // Mark any orphaned queued runs as error so they don't wait for stale timeout
+        await prisma.run.updateMany({
+          where: { iterationId, status: 'queued' },
+          data: { status: 'error', error: `Background generation failed: ${msg}` },
+        }).catch((e) => console.warn('[Generate] Failed to mark orphaned runs:', e));
       }
     });
 

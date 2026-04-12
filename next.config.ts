@@ -10,7 +10,9 @@ const nextConfig: NextConfig = {
   },
   images: {
     remotePatterns: [
+      { protocol: "https", hostname: "v3.fal.media", pathname: "/**" },
       { protocol: "https", hostname: "v3b.fal.media", pathname: "/**" },
+      { protocol: "https", hostname: "fal.media", pathname: "/**" },
       { protocol: "https", hostname: "storage.googleapis.com", pathname: "/**" },
     ],
   },

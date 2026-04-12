@@ -3,6 +3,7 @@
  * Handles HTTP communication with Fal.ai API
  */
 
+import { createFalClient, parseEndpointId } from '@fal-ai/client';
 import type {
   FalAIConfig,
   FalAIRequest,
@@ -11,21 +12,140 @@ import type {
   FalAIModelSearchResponse,
   FalAIQueueStatus,
   FalAIQueueStatusResponse,
-  FalAIQueueSubmitResponse,
   FalAIQueueResultResponse,
 } from './types';
+
+/**
+ * Queue base path for status/result URLs — aligned with @fal-ai/client queue (owner/alias only; workflows/… supported).
+ */
+export function falQueueModelBasePath(endpointId: string): string {
+  const appId = parseEndpointId(endpointId);
+  const prefix = appId.namespace ? `${appId.namespace}/` : '';
+  return `${prefix}${appId.owner}/${appId.alias}`;
+}
+
+/** Normalize queue status strings from the API (case / hyphen variants). */
+export function normalizeFalQueueStatus(raw: unknown): FalAIQueueStatus | undefined {
+  if (typeof raw !== 'string') return undefined;
+  const u = raw.trim().toUpperCase().replace(/[-\s]+/g, '_');
+  if (u === 'IN_QUEUE' || u === 'IN_PROGRESS' || u === 'COMPLETED' || u === 'FAILED') {
+    return u;
+  }
+  if (u === 'ERROR' || u === 'CANCELLED' || u === 'CANCELED' || u === 'FAILURE') {
+    return 'FAILED';
+  }
+  if (u === 'DONE' || u === 'SUCCESS' || u === 'COMPLETE') {
+    return 'COMPLETED';
+  }
+  return undefined;
+}
+
+/** Hint when fal returns bare 403 / Forbidden (docs: queue needs `Authorization: Key <FAL_KEY>`). */
+function enhanceFalAccessDeniedMessage(message: string): string {
+  const m = message.trim();
+  if (m === 'Forbidden' || m.includes('403') || m.toLowerCase().includes('forbidden')) {
+    return `${m} — fal.ai: use a valid API key with Model API access (https://fal.ai/dashboard/keys). The same key must be used for submit, status, and result. If this persists, try fetching via the queue \`response_url\` from the status response (already attempted by the app).`;
+  }
+  return m;
+}
+
+/** Public CDN file URLs must not use `Authorization: Key …` — many edge configs return 403 Forbidden. */
+function isFalPublicMediaUrl(url: string): boolean {
+  try {
+    const { hostname } = new URL(url);
+    return hostname === 'fal.media' || hostname.endsWith('.fal.media');
+  } catch {
+    return false;
+  }
+}
+
+function parseQueueResultPayload(data: unknown): {
+  output?: unknown;
+  error?: string;
+  status: FalAIQueueStatus;
+} {
+  if (data === null || data === undefined) {
+    return { status: 'COMPLETED', error: 'Empty result body' };
+  }
+
+  if (typeof data !== 'object') {
+    return { output: data, status: 'COMPLETED' };
+  }
+
+  const o = data as Record<string, unknown>;
+
+  if ('status' in o && 'request_id' in o) {
+    const wrapped = o as unknown as FalAIQueueResultResponse & { data?: unknown };
+    const st = normalizeFalQueueStatus(wrapped.status as unknown) ?? (wrapped.status as FalAIQueueStatus);
+    return {
+      status: st,
+      error: wrapped.error,
+      output: wrapped.data ?? wrapped.output,
+    };
+  }
+
+  const tryData = o.data;
+  if (tryData !== undefined && tryData !== null && typeof tryData === 'object') {
+    const inner = tryData as Record<string, unknown>;
+    if (
+      'images' in inner ||
+      'videos' in inner ||
+      'text' in inner ||
+      'output' in inner ||
+      'image' in inner ||
+      'video' in inner
+    ) {
+      return { output: tryData, status: 'COMPLETED' };
+    }
+  }
+
+  if (
+    'images' in o ||
+    'videos' in o ||
+    'text' in o ||
+    'output' in o ||
+    'image' in o ||
+    'video' in o
+  ) {
+    return { output: data, status: 'COMPLETED' };
+  }
+
+  if ('result' in o) {
+    return { output: o.result, status: 'COMPLETED' };
+  }
+
+  const fallback = o.data ?? o.output;
+  const err = typeof o.error === 'string' ? o.error : undefined;
+  return {
+    output: fallback,
+    error: err,
+    status: 'COMPLETED',
+  };
+}
 
 export class FalAIClient {
   private apiKey: string;
   private baseUrl: string;
   private readonly platformApiUrl: string;
-  private readonly queueApiUrl: string;
+  /** Lazy SDK client — same URL/auth/retry rules as fal docs. */
+  private falSdk: ReturnType<typeof createFalClient> | null = null;
 
   constructor(config: FalAIConfig) {
     this.apiKey = config.apiKey;
     this.baseUrl = config.baseUrl || 'https://fal.run';
     this.platformApiUrl = 'https://api.fal.ai';
-    this.queueApiUrl = 'https://queue.fal.run';
+  }
+
+  /** API key without a duplicate `Key ` prefix (fal expects `Authorization: Key <secret>`). */
+  private falKeyCredentials(): string {
+    return this.apiKey.replace(/^\s*Key\s+/i, '').trim();
+  }
+
+  private getFalSdk(): ReturnType<typeof createFalClient> {
+    if (!this.falSdk) {
+      this.falSdk = createFalClient({ credentials: this.falKeyCredentials() });
+    }
+    return this.falSdk;
   }
 
   /**
@@ -40,7 +160,7 @@ export class FalAIClient {
       const response = await fetch(url.toString(), {
         method: 'GET',
         headers: {
-          Authorization: `Key ${this.apiKey}`,
+          Authorization: `Key ${this.falKeyCredentials()}`,
           'Content-Type': 'application/json',
         },
       });
@@ -106,49 +226,19 @@ export class FalAIClient {
     payload: Record<string, unknown>
   ): Promise<string> {
     try {
-      // Queue API uses https://queue.fal.run/{model_id} format
-      const url = `${this.queueApiUrl}/${endpointId}`;
-
-      const response = await fetch(url, {
-        method: 'POST',
-        headers: {
-          Authorization: `Key ${this.apiKey}`,
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify(payload),
-      });
-
-      if (!response.ok) {
-        const errorText = await response.text();
-        throw new Error(
-          `Fal.ai Queue API error: ${response.status} ${response.statusText} - ${errorText}`
-        );
-      }
-
-      const data: FalAIQueueSubmitResponse = await response.json();
-      return data.request_id;
+      console.log(`[FalAI] submitQueueJob endpoint=${endpointId} payload keys=[${Object.keys(payload).join(', ')}]`);
+      const q = this.getFalSdk().queue;
+      const submitted = await q.submit(endpointId as never, { input: payload as never });
+      console.log(`[FalAI] submitQueueJob endpoint=${endpointId} requestId=${submitted.request_id}`);
+      return submitted.request_id;
     } catch (error) {
+      const msg = error instanceof Error ? error.message : String(error);
+      console.error(`[FalAI] submitQueueJob endpoint=${endpointId} FAILED:`, msg);
       if (error instanceof Error) {
         throw error;
       }
-      throw new Error(`Failed to submit queue job: ${String(error)}`);
+      throw new Error(`Failed to submit queue job: ${msg}`);
     }
-  }
-
-  /**
-   * Extract base model ID from endpoint ID (removes subpath for status/result endpoints)
-   * Example: "fal-ai/imagen4/preview" -> "fal-ai/imagen4"
-   * @param endpointId - Full endpoint ID with optional subpath
-   * @returns Base model ID without subpath
-   */
-  private extractBaseModelId(endpointId: string): string {
-    // Split by '/' and take first two parts (namespace/model)
-    // Example: "fal-ai/imagen4/preview" -> ["fal-ai", "imagen4", "preview"] -> "fal-ai/imagen4"
-    const parts = endpointId.split('/');
-    if (parts.length >= 2) {
-      return `${parts[0]}/${parts[1]}`;
-    }
-    return endpointId; // Fallback if format is unexpected
   }
 
   /**
@@ -156,32 +246,24 @@ export class FalAIClient {
    * @param modelId - The model endpoint ID (e.g., "fal-ai/imagen4/preview")
    * @param requestId - The request ID from submitQueueJob
    * @returns Status response with queue position info
-   * @note For status/result endpoints, subpath must be removed (e.g., "fal-ai/imagen4/preview" -> "fal-ai/imagen4")
+   * @note Queue path matches @fal-ai/client (falQueueModelBasePath).
    */
   async getQueueJobStatus(modelId: string, requestId: string): Promise<FalAIQueueStatusResponse> {
     try {
-      // Remove subpath for status endpoint (e.g., "fal-ai/imagen4/preview" -> "fal-ai/imagen4")
-      const baseModelId = this.extractBaseModelId(modelId);
-      // Queue API format: https://queue.fal.run/{model_id}/requests/{request_id}/status
-      const url = `${this.queueApiUrl}/${baseModelId}/requests/${requestId}/status`;
-
-      const response = await fetch(url, {
-        method: 'GET',
-        headers: {
-          Authorization: `Key ${this.apiKey}`,
-          'Content-Type': 'application/json',
-        },
-      });
-
-      if (!response.ok) {
-        const errorText = await response.text();
-        throw new Error(
-          `Fal.ai Queue API error: ${response.status} ${response.statusText} - ${errorText}`
+      const st = await this.getFalSdk().queue.status(modelId as never, { requestId });
+      const rawStatus = st.status as string;
+      const normalized = normalizeFalQueueStatus(rawStatus);
+      if (normalized === undefined && typeof rawStatus === 'string' && rawStatus.length > 0) {
+        console.warn(
+          `[FalAI] Unknown queue status from API endpoint=${modelId} requestId=${requestId} raw=${rawStatus}`
         );
       }
-
-      const data: FalAIQueueStatusResponse = await response.json();
-      return data;
+      return {
+        status: normalized ?? (rawStatus as FalAIQueueStatus),
+        request_id: st.request_id,
+        queue_position: 'queue_position' in st ? st.queue_position : undefined,
+        response_url: st.response_url,
+      };
     } catch (error) {
       if (error instanceof Error) {
         throw error;
@@ -195,90 +277,93 @@ export class FalAIClient {
    * @param modelId - The model endpoint ID (e.g., "fal-ai/imagen4/preview")
    * @param requestId - The request ID from submitQueueJob
    * @returns The result output or error
-   * @note For status/result endpoints, subpath must be removed (e.g., "fal-ai/imagen4/preview" -> "fal-ai/imagen4")
+   * @param options.responseUrl — When present (from status.response_url), use this URL; fal may move result payloads here.
    */
-  async getQueueJobResult(modelId: string, requestId: string): Promise<{
+  async getQueueJobResult(
+    modelId: string,
+    requestId: string,
+    options?: { responseUrl?: string | null }
+  ): Promise<{
     output?: unknown;
     error?: string;
     status: FalAIQueueStatus;
   }> {
-    try {
-      // Remove subpath for result endpoint (e.g., "fal-ai/imagen4/preview" -> "fal-ai/imagen4")
-      const baseModelId = this.extractBaseModelId(modelId);
-      // Queue API format: https://queue.fal.run/{model_id}/requests/{request_id}
-      const url = `${this.queueApiUrl}/${baseModelId}/requests/${requestId}`;
+    const explicitUrl = options?.responseUrl?.trim();
 
-      const response = await fetch(url, {
-        method: 'GET',
-        headers: {
-          Authorization: `Key ${this.apiKey}`,
-          'Content-Type': 'application/json',
-        },
-      });
+    const trySdkResult = async () => {
+      const res = await this.getFalSdk().queue.result(modelId as never, { requestId });
+      return {
+        output: res.data,
+        error: undefined,
+        status: 'COMPLETED' as const,
+      };
+    };
 
-      if (!response.ok) {
-        const errorText = await response.text();
-        throw new Error(
-          `Fal.ai Queue API error: ${response.status} ${response.statusText} - ${errorText}`
-        );
-      }
-
-      const data = await response.json();
-      
-      // Fal.ai Queue API result endpoint returns the result directly
-      // The response can be:
-      // 1. Direct result object (e.g., { images: [...], timings: {...}, ... })
-      // 2. Wrapped in a response object with status/request_id/error fields
-      // 3. Nested in 'data' or 'output' fields
-      
-      // Check if response has status/request_id (wrapped response format)
-      const isWrappedResponse = data && typeof data === 'object' && 'status' in data && 'request_id' in data;
-      
-      let resultOutput: unknown;
-      let error: string | undefined;
-      let status: FalAIQueueStatus;
-      
-      if (isWrappedResponse) {
-        // Wrapped response format: { status, request_id, output?, error?, data? }
-        const wrapped = data as FalAIQueueResultResponse & { data?: unknown };
-        status = wrapped.status;
-        error = wrapped.error;
-        resultOutput = wrapped.data ?? wrapped.output;
-      } else {
-        // Direct result format: the entire response is the result
-        // Check if it looks like a result (has images, videos, text, etc.)
-        const hasResultFields = data && typeof data === 'object' && (
-          'images' in data || 
-          'videos' in data || 
-          'text' in data ||
-          'output' in data
-        );
-        
-        if (hasResultFields) {
-          // Entire response is the result
-          resultOutput = data;
-          status = 'COMPLETED';
-          error = undefined;
-        } else {
-          // Fallback: try to extract from common fields
-          const fallback = data as { data?: unknown; output?: unknown; error?: string };
-          resultOutput = fallback.data ?? fallback.output;
-          status = 'COMPLETED';
-          error = fallback.error;
+    /**
+     * fal docs: completed status includes `response_url` (often `.../requests/{id}/response`).
+     * Prefer that URL first — some setups differ from the SDK’s `.../requests/{id}` GET.
+     */
+    if (explicitUrl?.length) {
+      try {
+        return await this.fetchQueueResultFromUrl(explicitUrl);
+      } catch (fromUrlErr) {
+        try {
+          return await trySdkResult();
+        } catch (sdkErr) {
+          const a = fromUrlErr instanceof Error ? fromUrlErr.message : String(fromUrlErr);
+          const b = sdkErr instanceof Error ? sdkErr.message : String(sdkErr);
+          return {
+            output: undefined,
+            error: enhanceFalAccessDeniedMessage(`${a} | SDK: ${b}`),
+            status: 'FAILED',
+          };
         }
       }
-      
-      return {
-        output: resultOutput,
-        error,
-        status,
-      };
-    } catch (error) {
-      if (error instanceof Error) {
-        throw error;
-      }
-      throw new Error(`Failed to get queue job result: ${String(error)}`);
     }
+
+    try {
+      return await trySdkResult();
+    } catch (sdkErr) {
+      const msg = sdkErr instanceof Error ? sdkErr.message : String(sdkErr);
+      return {
+        output: undefined,
+        error: enhanceFalAccessDeniedMessage(msg),
+        status: 'FAILED',
+      };
+    }
+  }
+
+  /** Manual GET when `queue.result` fails but status provided `response_url`. */
+  private async fetchQueueResultFromUrl(url: string): Promise<{
+    output?: unknown;
+    error?: string;
+    status: FalAIQueueStatus;
+  }> {
+    const headers: Record<string, string> = { Accept: 'application/json' };
+    if (!isFalPublicMediaUrl(url)) {
+      headers.Authorization = `Key ${this.falKeyCredentials()}`;
+    }
+    let response = await fetch(url, { method: 'GET', headers });
+    if (!response.ok && isFalPublicMediaUrl(url) && response.status === 403) {
+      const retryHeaders: Record<string, string> = {
+        Accept: 'application/json',
+        Authorization: `Key ${this.falKeyCredentials()}`,
+      };
+      response = await fetch(url, { method: 'GET', headers: retryHeaders });
+    }
+    if (!response.ok) {
+      const errorText = await response.text();
+      throw new Error(
+        `Fal.ai result URL error: ${response.status} ${response.statusText} - ${errorText}`
+      );
+    }
+    const data = await response.json();
+    const parsed = parseQueueResultPayload(data);
+    return {
+      output: parsed.output,
+      error: parsed.error,
+      status: parsed.status,
+    };
   }
 
   /**
@@ -299,8 +384,6 @@ export class FalAIClient {
         return file;
       }
 
-      const url = `${this.platformApiUrl}/v1/files`;
-
       // Extract base64 data and content type from data URI
       if (!file.startsWith('data:')) {
         throw new Error('File must be a data URI (data:...) or URL');
@@ -310,40 +393,13 @@ export class FalAIClient {
       const mimeMatch = header.match(/data:([^;]+)/);
       const detectedContentType = mimeMatch ? mimeMatch[1] : contentType || 'image/png';
 
-      // Convert base64 to Buffer (Node.js environment)
       const buffer = Buffer.from(base64Data, 'base64');
+      const credentials = this.falKeyCredentials();
 
-      // Create multipart/form-data body manually (Node.js compatible)
-      const boundary = `----WebKitFormBoundary${Date.now()}`;
-      const formDataParts: string[] = [];
-      
-      formDataParts.push(`--${boundary}`);
-      formDataParts.push(`Content-Disposition: form-data; name="file"; filename="upload"`);
-      formDataParts.push(`Content-Type: ${detectedContentType}`);
-      formDataParts.push('');
-      formDataParts.push(buffer.toString('binary'));
-      formDataParts.push(`--${boundary}--`);
-
-      const formDataBody = formDataParts.join('\r\n');
-
-      const response = await fetch(url, {
-        method: 'POST',
-        headers: {
-          Authorization: `Key ${this.apiKey}`,
-          'Content-Type': `multipart/form-data; boundary=${boundary}`,
-        },
-        body: Buffer.from(formDataBody, 'binary'),
-      });
-
-      if (!response.ok) {
-        const errorText = await response.text();
-        throw new Error(
-          `Fal.ai Upload API error: ${response.status} ${response.statusText} - ${errorText}`
-        );
-      }
-
-      const data: { url: string } = await response.json();
-      return data.url;
+      // fal CDN upload (replaces removed POST /v1/files on api.fal.ai)
+      const fal = createFalClient({ credentials });
+      const blob = new Blob([new Uint8Array(buffer)], { type: detectedContentType });
+      return await fal.storage.upload(blob);
     } catch (error) {
       if (error instanceof Error) {
         throw error;

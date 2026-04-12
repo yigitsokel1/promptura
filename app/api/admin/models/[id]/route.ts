@@ -1,3 +1,4 @@
+import { Prisma } from '@prisma/client';
 import { NextRequest, NextResponse } from 'next/server';
 import { prisma } from '@/src/db/client';
 import { findModelEndpointWithSpec } from '@/src/db/queries';
@@ -58,5 +59,26 @@ export async function PATCH(
     return NextResponse.json({ model });
   } catch (error) {
     return handleApiError(error, '/api/admin/models/[id] (PATCH)');
+  }
+}
+
+/**
+ * Delete model endpoint (ADMIN only). Cascades specs, research jobs, and runs.
+ */
+export async function DELETE(
+  _request: NextRequest,
+  { params }: { params: Promise<{ id: string }> }
+) {
+  const admin = await requireAdmin();
+  if (!admin) return unauthorizedResponse();
+  try {
+    const { id } = await params;
+    await prisma.modelEndpoint.delete({ where: { id } });
+    return new NextResponse(null, { status: 204 });
+  } catch (error) {
+    if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === 'P2025') {
+      return NextResponse.json({ error: 'Model not found' }, { status: 404 });
+    }
+    return handleApiError(error, '/api/admin/models/[id] (DELETE)');
   }
 }
