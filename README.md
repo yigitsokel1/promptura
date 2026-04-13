@@ -68,11 +68,11 @@ For the design rationale (why task-based, why no manual mode, why Gemini is the 
 
 ## User API Keys
 
-- **Per-user keys for execution**: fal.ai and EachLabs API keys are **stored per user**, not shared. Users set them in **Settings → Provider keys**. Keys are never returned to the client or logged.
+- **Per-user keys for execution and prompting**: fal.ai, EachLabs, and Gemini API keys are **stored per user**, not shared. Users set them in **Settings → Provider keys**. Keys are never returned to the client or logged.
 - **Encryption**: Keys are encrypted at rest (AES-256-GCM) using `PROVIDER_KEY_ENCRYPTION_SECRET`. Plaintext exists only in memory when needed for a request.
-- **Where keys are used**: Generate and Refine call `requireUserProviderKey(userId, provider)` to get the key, then pass it to the execution provider. Status polling uses the iteration’s `userId` to load the same key for fal.ai/EachLabs job status.
+- **Where keys are used**: Generate/Refine use the user's Gemini key for prompt generation, and user fal.ai/EachLabs keys for execution. Status polling uses the iteration’s `userId` to load the same execution provider key.
 - **Missing key**: If the user has not set a key for the chosen provider, the API returns `400` with `code: 'MissingProviderKey'` and a clear message to add the key in Settings.
-- **Gemini**: Prompt generation uses a **centralized** Gemini API key (server env). Rationale: [ADR-005: Why Gemini key is centralized](docs/adr/ADR-005-gemini-key-centralized.md).
+- **Gemini for research**: Admin research flows continue to use a centralized server Gemini key.
 
 ## Multi-provider architecture
 

@@ -19,9 +19,9 @@ const db = prisma as typeof prisma & {
   };
 };
 
-export type ProviderSlug = 'falai' | 'eachlabs';
+export type ProviderSlug = 'falai' | 'eachlabs' | 'gemini';
 
-const PROVIDERS: ProviderSlug[] = ['falai', 'eachlabs'];
+const PROVIDERS: ProviderSlug[] = ['falai', 'eachlabs', 'gemini'];
 
 export function getSupportedProviders(): ProviderSlug[] {
   return [...PROVIDERS];
@@ -55,7 +55,7 @@ export async function requireUserProviderKey(
 ): Promise<string> {
   const key = await getUserProviderKey(userId, provider);
   if (!key) {
-    const name = provider === 'falai' ? 'fal.ai' : 'eachlabs';
+    const name = provider === 'falai' ? 'fal.ai' : provider === 'eachlabs' ? 'eachlabs' : 'Gemini';
     throw new Error(
       `No API key configured for ${name}. Add your key in Settings → Provider keys.`
     );
@@ -100,5 +100,6 @@ export async function listUserProviderKeys(
   return {
     falai: set.has('falai'),
     eachlabs: set.has('eachlabs'),
+    gemini: set.has('gemini'),
   };
 }

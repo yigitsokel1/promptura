@@ -46,7 +46,7 @@ export default function Playground() {
   const [iterationIndex, setIterationIndex] = useState(1);
   /** Lightbox: show full-size image when user clicks a thumbnail */
   const [lightboxImageUrl, setLightboxImageUrl] = useState<string | null>(null);
-  /** At least one provider (fal.ai or EachLabs) has an API key configured. null = still loading. */
+  /** Required provider keys configured for playground flow (Gemini + at least one execution provider). */
   const [hasProviderKey, setHasProviderKey] = useState<boolean | null>(null);
   /** Task input assets for image-to-image, image-to-video, etc. (data URL or URL) */
   const [taskImageUrl, setTaskImageUrl] = useState<string>('');
@@ -146,7 +146,7 @@ export default function Playground() {
     fetchModels();
   }, [fetchModels]);
 
-  // Check if user has at least one provider API key (for Settings warning)
+  // Check if user has required keys (Gemini + at least one execution provider)
   useEffect(() => {
     let cancelled = false;
     fetch('/api/settings/providers')
@@ -154,7 +154,7 @@ export default function Playground() {
       .then((data) => {
         if (cancelled) return;
         const p = data.providers ?? {};
-        setHasProviderKey(Boolean(p.falai || p.eachlabs));
+        setHasProviderKey(Boolean(p.gemini && (p.falai || p.eachlabs)));
       })
       .catch(() => {
         if (!cancelled) setHasProviderKey(false);
@@ -299,6 +299,12 @@ export default function Playground() {
       const data = await response.json();
 
       if (!response.ok) {
+        if (
+          data?.code === 'ModalityDeferred' &&
+          (data?.modality === 'image-to-video' || data?.modality === 'video-to-video')
+        ) {
+          throw new Error('Unable to determine modality (model has no modality in catalog)');
+        }
         throw new Error(data.error || 'Failed to add model');
       }
 
@@ -620,8 +626,8 @@ export default function Playground() {
             className="mb-6 flex flex-wrap items-center gap-3 rounded-xl border-2 border-amber-400 bg-amber-50 px-5 py-4 dark:border-amber-500 dark:bg-amber-950/40"
           >
             <span className="text-amber-800 dark:text-amber-200">
-              Before using the Playground, add at least one provider API key (fal.ai or EachLabs) in Settings.
-              Generation and model runs will not work until a key is configured.
+              Before using the Playground, add your Gemini API key and at least one execution provider key (fal.ai or EachLabs) in Settings.
+              Generate/Refine and model runs will not work until keys are configured.
             </span>
             <Link
               href="/settings"

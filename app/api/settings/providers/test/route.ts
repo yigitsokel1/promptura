@@ -12,9 +12,9 @@ export async function POST(request: NextRequest) {
   try {
     const body = await request.json();
     const { provider, apiKey: bodyKey } = body as { provider?: string; apiKey?: string };
-    if (provider !== 'falai' && provider !== 'eachlabs') {
+    if (provider !== 'falai' && provider !== 'eachlabs' && provider !== 'gemini') {
       return NextResponse.json(
-        { error: 'provider must be "falai" or "eachlabs"', ok: false },
+        { error: 'provider must be "falai", "eachlabs", or "gemini"', ok: false },
         { status: 400 }
       );
     }
@@ -64,6 +64,28 @@ export async function POST(request: NextRequest) {
         return NextResponse.json({
           ok: false,
           error: res.status === 401 ? 'Invalid API key.' : `Connection failed (${res.status}).`,
+        });
+      }
+      return NextResponse.json({ ok: true });
+    }
+    if (provider === 'gemini') {
+      const model = process.env.GEMINI_MODEL || 'gemini-2.0-flash';
+      const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${encodeURIComponent(key)}`;
+      const res = await fetch(url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          contents: [{ parts: [{ text: 'Say ok.' }] }],
+          generationConfig: { maxOutputTokens: 8 },
+        }),
+      });
+      if (res.status === 401 || res.status === 403) {
+        return NextResponse.json({ ok: false, error: 'Invalid Gemini API key.' });
+      }
+      if (!res.ok) {
+        return NextResponse.json({
+          ok: false,
+          error: `Gemini connection failed (${res.status}).`,
         });
       }
       return NextResponse.json({ ok: true });

@@ -4,7 +4,12 @@
 
 import type { FalAIClient } from '../client';
 import { falQueueModelBasePath, normalizeFalQueueStatus } from '../client';
-import { buildFalAIPayload, convertFalAIOutputToOutputAssets, getFalOpenApiInputPropertyKeys } from '../helpers';
+import {
+  buildFalAIPayload,
+  convertFalAIOutputToOutputAssets,
+  determineModalityFromCategory,
+  getFalOpenApiInputPropertyKeys,
+} from '../helpers';
 import type { CandidatePrompt } from '@/src/core/types';
 import type { ModelSpec } from '@/src/core/modelSpec';
 
@@ -232,5 +237,11 @@ describe('buildFalAIPayload', () => {
       { assets: [{ type: 'image', url: tinyPng }] }
     );
     expect(payload.image_url).toBe(tinyPng);
+  });
+});
+
+describe('determineModalityFromCategory', () => {
+  it('prioritizes video when category contains both image and video', () => {
+    expect(determineModalityFromCategory('image-to-video')).toBe('video');
   });
 });

@@ -207,8 +207,16 @@ export async function POST(request: NextRequest) {
       }
     }
 
-    // Always use Gemini for prompt generation (Sprint 3)
-    const promptAdapter = getPromptGenerationAdapter();
+    let userGeminiApiKey: string;
+    try {
+      userGeminiApiKey = await requireUserProviderKey(session.user.id, 'gemini');
+    } catch (keyError) {
+      const msg = keyError instanceof Error ? keyError.message : 'Missing Gemini API key';
+      return NextResponse.json({ error: msg, code: 'MissingProviderKey' }, { status: 400 });
+    }
+
+    // Prompt generation: use user's Gemini key
+    const promptAdapter = getPromptGenerationAdapter({ apiKey: userGeminiApiKey });
     const runnerAdapter = getProviderAdapter(targetModel, { apiKey: userApiKey });
 
     // Generate iteration ID

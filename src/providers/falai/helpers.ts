@@ -115,12 +115,12 @@ export function determineModalityFromCategory(
     return 'text';
   }
 
-  if (category.includes('image')) {
-    return 'image';
-  }
-
   if (category.includes('video')) {
     return 'video';
+  }
+
+  if (category.includes('image')) {
+    return 'image';
   }
 
   return 'text';

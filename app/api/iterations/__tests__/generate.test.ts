@@ -465,7 +465,7 @@ describe('POST /api/iterations/generate', () => {
       ],
     };
 
-    it('passes task.assets to runCandidates for image-to-video', async () => {
+    it('rejects deferred image-to-video modality', async () => {
       (prisma.modelEndpoint.findUnique as jest.Mock).mockResolvedValue(mockModelEndpoint);
       mockRequireUserProviderKey.mockResolvedValue('mock-eachlabs-key');
 
@@ -482,17 +482,9 @@ describe('POST /api/iterations/generate', () => {
       });
 
       const response = await POST(request);
-      expect(response.status).toBe(202);
-
-      await new Promise((r) => setTimeout(r, 500));
-      expect(mockRunCandidates).toHaveBeenCalled();
-      const [passedTask] = mockRunCandidates.mock.calls[mockRunCandidates.mock.calls.length - 1];
-      expect(passedTask.modality).toBe('image-to-video');
-      expect(passedTask.assets).toHaveLength(1);
-      expect(passedTask.assets?.[0]).toEqual({
-        type: 'image',
-        url: 'https://example.com/keyframe.png',
-      });
+      expect(response.status).toBe(400);
+      const data = await response.json();
+      expect(data.code).toBe('ModalityNotSupported');
     });
   });
 });

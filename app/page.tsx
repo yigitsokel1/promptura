@@ -24,8 +24,14 @@ export default function Home() {
             diverse candidate prompts, runs them on the model, and shows results side by side.
             You pick the outputs you like and add notes; the next round produces 10
             refined prompts based on your feedback. A structured loop to find the right prompt
-            for text, image, or video generation.
+            for text, image, and video generation.
           </p>
+          <div className="mt-4 rounded-xl border border-zinc-200 bg-zinc-50 p-4 text-sm text-zinc-700 dark:border-zinc-800 dark:bg-zinc-950 dark:text-zinc-300">
+            <p>
+              <strong className="text-zinc-900 dark:text-zinc-100">Current supported modalities:</strong>{' '}
+              text-to-image, image-to-image, text-to-video.
+            </p>
+          </div>
           <ul className="mt-4 space-y-2 text-sm text-zinc-600 dark:text-zinc-400">
             <li className="flex items-start gap-2">
               <span className="mt-0.5 text-amber-500 dark:text-amber-400">•</span>

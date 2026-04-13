@@ -34,6 +34,11 @@ const MAX_RETRIES = 3;
 const STALE_RUNNING_MS = 10 * 60 * 1000; // 10 min → consider running job stale
 let activeResearchCount = 0;
 
+function debugResearch(message: string, ...args: unknown[]): void {
+  if (process.env.NODE_ENV === 'test') return;
+  console.debug(message, ...args);
+}
+
 /** Backoff delay in ms for attempt (0-indexed): 2^attempt * 2s, cap 60s */
 function backoffMs(attempt: number): number {
   return Math.min(60_000, Math.pow(2, attempt) * 2000);
@@ -276,7 +281,10 @@ export async function runResearchJob(researchJobId: string): Promise<void> {
     const detected_input_fields = derived.detected_input_fields;
     const modalityDebug = derived.modalityDebug;
     if (detected_input_fields.length > 0) {
-      console.debug(`[research] ${modelEndpoint.endpointId} detected_input_fields:`, detected_input_fields);
+      debugResearch(
+        `[research] ${modelEndpoint.endpointId} detected_input_fields:`,
+        detected_input_fields
+      );
     }
 
     // 2) Gemini produces only prompt guidelines + summary (never modality/required_assets/params)

@@ -326,8 +326,8 @@ Return ONLY the JSON, no markdown, no code blocks, no explanations.`;
 /**
  * Create Gemini adapter from environment variables
  */
-export function createGeminiAdapter(): GeminiAdapter {
-  const apiKey = process.env.GEMINI_API_KEY;
+export function createGeminiAdapter(options?: { apiKey?: string }): GeminiAdapter {
+  const apiKey = options?.apiKey ?? process.env.GEMINI_API_KEY;
   if (!apiKey) {
     throw new Error('GEMINI_API_KEY environment variable is required');
   }

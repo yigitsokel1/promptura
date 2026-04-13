@@ -56,8 +56,8 @@ export function getProviderAdapter(
  * Get prompt generation adapter
  * Sprint 3: Always use Gemini for prompt generation (no mock, no fallback)
  */
-export function getPromptGenerationAdapter(): ProviderAdapter {
+export function getPromptGenerationAdapter(options?: { apiKey?: string }): ProviderAdapter {
   // Sprint 3: Prompt generation is always done by Gemini
   // No mock support - Gemini is required
-  return createGeminiAdapter();
+  return createGeminiAdapter(options);
 }

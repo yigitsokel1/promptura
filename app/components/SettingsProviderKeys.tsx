@@ -2,20 +2,23 @@
 
 import { useState, useEffect, useCallback } from 'react';
 
-type ProviderSlug = 'falai' | 'eachlabs';
+type ProviderSlug = 'falai' | 'eachlabs' | 'gemini';
 
 const LABELS: Record<ProviderSlug, string> = {
   falai: 'fal.ai',
   eachlabs: 'EachLabs',
+  gemini: 'Gemini',
 };
 
 export function SettingsProviderKeys() {
   const [configured, setConfigured] = useState<Record<ProviderSlug, boolean>>({
     falai: false,
     eachlabs: false,
+    gemini: false,
   });
   const [falaiKey, setFalaiKey] = useState('');
   const [eachlabsKey, setEachlabsKey] = useState('');
+  const [geminiKey, setGeminiKey] = useState('');
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState<ProviderSlug | null>(null);
   const [testing, setTesting] = useState<ProviderSlug | null>(null);
@@ -39,7 +42,7 @@ export function SettingsProviderKeys() {
   }, []);
 
   const saveKey = async (provider: ProviderSlug) => {
-    const value = (provider === 'falai' ? falaiKey : eachlabsKey).trim();
+    const value = (provider === 'falai' ? falaiKey : provider === 'eachlabs' ? eachlabsKey : geminiKey).trim();
     if (!value) {
       setMessage({ type: 'err', text: 'Enter an API key first.' });
       return;
@@ -57,6 +60,7 @@ export function SettingsProviderKeys() {
       setMessage({ type: 'ok', text: `${LABELS[provider]} key saved. Stored encrypted, never shown.` });
       if (provider === 'falai') setFalaiKey('');
       if (provider === 'eachlabs') setEachlabsKey('');
+      if (provider === 'gemini') setGeminiKey('');
       await fetchConfigured();
     } catch (e) {
       setMessage({ type: 'err', text: e instanceof Error ? e.message : 'Failed to save' });
@@ -66,7 +70,7 @@ export function SettingsProviderKeys() {
   };
 
   const testConnection = async (provider: ProviderSlug) => {
-    const value = provider === 'falai' ? falaiKey : eachlabsKey;
+    const value = provider === 'falai' ? falaiKey : provider === 'eachlabs' ? eachlabsKey : geminiKey;
     setTesting(provider);
     setMessage(null);
     try {
@@ -120,7 +124,7 @@ export function SettingsProviderKeys() {
       )}
 
       <div className="space-y-6">
-        {(['falai', 'eachlabs'] as const).map((provider) => (
+        {(['falai', 'eachlabs', 'gemini'] as const).map((provider) => (
           <section
             key={provider}
             className="rounded-xl border border-zinc-200 bg-white p-5 dark:border-zinc-700 dark:bg-zinc-900"
@@ -136,15 +140,21 @@ export function SettingsProviderKeys() {
             <p className="mt-1 text-sm text-zinc-500 dark:text-zinc-400">
               {provider === 'falai'
                 ? 'Used for fal.ai image/video models in the Playground.'
-                : 'Used for EachLabs models in the Playground.'}
+                : provider === 'eachlabs'
+                  ? 'Used for EachLabs models in the Playground.'
+                  : 'Used for prompt generation in the Playground (Generate/Refine).'}
             </p>
             <div className="mt-4 flex flex-wrap items-center gap-3">
               <input
                 type="password"
                 placeholder={configured[provider] ? '•••••••• (leave blank to keep)' : 'Paste API key'}
-                value={provider === 'falai' ? falaiKey : eachlabsKey}
+                value={provider === 'falai' ? falaiKey : provider === 'eachlabs' ? eachlabsKey : geminiKey}
                 onChange={(e) =>
-                  provider === 'falai' ? setFalaiKey(e.target.value) : setEachlabsKey(e.target.value)
+                  provider === 'falai'
+                    ? setFalaiKey(e.target.value)
+                    : provider === 'eachlabs'
+                      ? setEachlabsKey(e.target.value)
+                      : setGeminiKey(e.target.value)
                 }
                 className="min-w-[220px] rounded-lg border border-zinc-300 bg-white px-3 py-2 text-sm dark:border-zinc-600 dark:bg-zinc-800 dark:text-white"
               />
