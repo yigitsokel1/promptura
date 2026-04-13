@@ -33,6 +33,7 @@ const MAX_CONCURRENT_RESEARCH = 2;
 const MAX_RETRIES = 3;
 const STALE_RUNNING_MS = 10 * 60 * 1000; // 10 min → consider running job stale
 let activeResearchCount = 0;
+const SHOULD_AUTO_DRAIN_QUEUE = process.env.NODE_ENV !== 'test';
 
 function debugResearch(message: string, ...args: unknown[]): void {
   if (process.env.NODE_ENV === 'test') return;
@@ -195,7 +196,7 @@ export async function updateResearchJobError(
       data: { status: 'research_failed' },
     });
   } else if (willRetry) {
-    processNextQueuedJob();
+    if (SHOULD_AUTO_DRAIN_QUEUE) processNextQueuedJob();
   }
 }
 
@@ -353,7 +354,7 @@ export async function runResearchJob(researchJobId: string): Promise<void> {
     throw error;
   } finally {
     activeResearchCount--;
-    processNextQueuedJob();
+    if (SHOULD_AUTO_DRAIN_QUEUE) processNextQueuedJob();
   }
 }
 
