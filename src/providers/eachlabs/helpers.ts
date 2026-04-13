@@ -98,6 +98,7 @@ export function eachLabsRequiredAssets(detail: EachLabsModelDetail): RequiredAss
 const EACHLABS_KNOWN_INPUT_DEFAULTS: Record<string, unknown> = {
   quality: 'high',
   duration: 5,
+  aspect_ratio: '16:9',
 };
 
 /**
@@ -121,4 +122,18 @@ export function eachLabsRequiredInputDefaults(detail: EachLabsModelDetail): Reco
     }
   }
   return out;
+}
+
+export function eachLabsAspectRatioOptions(detail: EachLabsModelDetail): string[] {
+  const props = detail.request_schema?.properties;
+  const prop = props?.aspect_ratio ?? props?.aspectRatio;
+  if (!prop || !Array.isArray(prop.enum)) return [];
+  return prop.enum.filter((v): v is string => typeof v === 'string' && v.trim().length > 0);
+}
+
+export function eachLabsAspectRatioDefault(detail: EachLabsModelDetail): string | undefined {
+  const props = detail.request_schema?.properties;
+  const prop = props?.aspect_ratio ?? props?.aspectRatio;
+  if (!prop) return undefined;
+  return typeof prop.default === 'string' ? prop.default : undefined;
 }

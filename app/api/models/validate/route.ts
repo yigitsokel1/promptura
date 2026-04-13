@@ -12,12 +12,25 @@ import { prisma } from '@/src/db/client';
 import { handleApiError } from '@/src/lib/api-helpers';
 import { runResearchJob, startResearchQueueTicker } from '@/src/lib/research-helpers';
 import { requireAuth, unauthorizedResponse } from '@/src/lib/auth';
+import type { Modality } from '@/src/core/types';
+import { isDeferredVideoModality, videoRolloutErrorMessage } from '@/src/lib/video-rollout';
 
 type SourceSlug = 'fal.ai' | 'eachlabs';
 
 interface ValidateRequest {
   endpointId: string;
   source?: SourceSlug;
+}
+
+function normalizeValidateModality(modality: string): Modality {
+  if (modality === 'text' || modality === 'text-to-text') return 'text-to-text';
+  if (modality === 'image' || modality === 'text-to-image' || modality === 'image-to-image') {
+    return modality === 'image-to-image' ? 'image-to-image' : 'text-to-image';
+  }
+  if (modality === 'video' || modality === 'text-to-video') return 'text-to-video';
+  if (modality === 'image-to-video') return 'image-to-video';
+  if (modality === 'video-to-video') return 'video-to-video';
+  return 'text-to-text';
 }
 
 /**
@@ -141,11 +154,23 @@ export async function POST(request: NextRequest) {
       }
     }
 
+    const normalizedModality = normalizeValidateModality(modality);
+    if (isDeferredVideoModality(normalizedModality)) {
+      return NextResponse.json(
+        {
+          error: videoRolloutErrorMessage(normalizedModality),
+          code: 'ModalityDeferred',
+          modality: normalizedModality,
+        },
+        { status: 400 }
+      );
+    }
+
     const modelEndpoint = await prisma.modelEndpoint.create({
       data: {
         endpointId,
         kind,
-        modality,
+        modality: normalizedModality,
         status: 'pending_research',
         source,
         provider,

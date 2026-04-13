@@ -7,6 +7,7 @@ import type { TaskSpec, Modality, Iteration, OutputAsset, FeedbackItem } from '@
 import type { ModelEndpointWithRelations } from '@/src/db/types';
 import { shouldApplyStatusUpdate } from '@/src/lib/iterationPolling';
 import { compressImageToDataUrl } from '@/src/lib/image-compress';
+import { isDeferredVideoModality } from '@/src/lib/video-rollout';
 import { OutputPreview } from '@/app/components/OutputPreview';
 
 interface IterationStatus {
@@ -31,6 +32,7 @@ export default function Playground() {
   const [models, setModels] = useState<ModelEndpointWithRelations[]>([]);
   const [selectedModelId, setSelectedModelId] = useState<string>('');
   const [taskGoal, setTaskGoal] = useState<string>('');
+  const [aspectRatioChoice, setAspectRatioChoice] = useState<string>('auto');
   const [taskModality, setTaskModality] = useState<Modality | null>(null);
   const [iteration, setIteration] = useState<Iteration | null>(null);
   const [iterationStatus, setIterationStatus] = useState<IterationStatus | null>(null);
@@ -90,6 +92,13 @@ export default function Playground() {
     return r === 'video' || r === 'image+video';
   };
 
+  const aspectRatioOptionsFromModel = (model: ModelEndpointWithRelations): string[] => {
+    const spec = model.modelSpecs?.[0]?.specJson as { aspect_ratio_options?: unknown } | undefined;
+    const options = spec?.aspect_ratio_options;
+    if (!Array.isArray(options)) return [];
+    return options.filter((v): v is string => typeof v === 'string' && v.trim().length > 0);
+  };
+
   useEffect(() => {
     if (selectedModelId) {
       const selectedModel = models.find((m) => m.id === selectedModelId);
@@ -109,6 +118,7 @@ export default function Playground() {
     setTaskVideoUrl('');
     setTaskVideoUrlLink('');
     setVideoFileOverLimit(false);
+    setAspectRatioChoice('auto');
   }, [selectedModelId]);
 
   // Fetch models (including pending_research for polling)
@@ -353,6 +363,7 @@ export default function Playground() {
       const task: TaskSpec = {
         goal: taskGoal.trim(),
         modality: taskModality,
+        ...(aspectRatioChoice !== 'auto' ? { aspectRatio: aspectRatioChoice } : {}),
         ...(assets.length > 0 && { assets }),
       };
 
@@ -641,7 +652,10 @@ export default function Playground() {
                 <option value="">-- Select a model --</option>
                 {(['fal.ai', 'eachlabs'] as const).map((source) => {
                   const sourceModels = models.filter(
-                    (m) => m.source === source && (m.status === 'active' || m.status === 'pending_research')
+                    (m) =>
+                      m.source === source &&
+                      (m.status === 'active' || m.status === 'pending_research') &&
+                      !isDeferredVideoModality(mapModalityFromModel(m))
                   );
                   if (sourceModels.length === 0) return null;
                   return (
@@ -759,6 +773,9 @@ export default function Playground() {
               if (!selectedModel) return null;
               const reqImage = requiresImageInput(selectedModel);
               const reqVideo = requiresVideoInput(selectedModel);
+              const aspectOptions = aspectRatioOptionsFromModel(selectedModel);
+              const canChooseAspectRatio =
+                taskModality === 'text-to-video' && aspectOptions.length > 0;
               const taskLabel = taskModality === 'image-to-video' ? 'Motion description' : 'Task goal';
               const taskPlaceholder = taskModality === 'image-to-video'
                 ? 'e.g., smooth camera pan, character walking forward'
@@ -779,6 +796,26 @@ export default function Playground() {
                       className="mt-1 block w-full rounded-md border border-zinc-300 px-3 py-2 shadow-sm focus:border-zinc-500 focus:outline-none focus:ring-zinc-500 dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-50"
                     />
                   </div>
+
+                  {canChooseAspectRatio && (
+                    <div>
+                      <label className="block text-sm font-medium text-zinc-700 dark:text-zinc-300">
+                        Aspect ratio
+                      </label>
+                      <select
+                        value={aspectRatioChoice}
+                        onChange={(e) => setAspectRatioChoice(e.target.value)}
+                        className="mt-1 block w-full rounded-md border border-zinc-300 px-3 py-2 shadow-sm focus:border-zinc-500 focus:outline-none focus:ring-zinc-500 dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-50"
+                      >
+                        <option value="auto">Auto (model default)</option>
+                        {aspectOptions.map((ratio) => (
+                          <option key={ratio} value={ratio}>
+                            {ratio}
+                          </option>
+                        ))}
+                      </select>
+                    </div>
+                  )}
 
                   {/* Image upload: only when model requires image (required_assets) */}
                   {reqImage && (

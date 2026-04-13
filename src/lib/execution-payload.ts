@@ -14,12 +14,15 @@ import { modelSpecNeedsImage, modelSpecNeedsVideo } from '@/src/core/modelSpec';
 import type { TaskAsset } from '@/src/core/types';
 import type { CandidatePromptInputAssets } from '@/src/core/types';
 import { isImageAssetKey, isVideoAssetKey } from '@/src/lib/modality-inference';
+import type { VideoInputProfile } from '@/src/lib/video-input-profile';
 
 export interface BuildExecutionPayloadInput {
   modelSpec: ModelSpec;
   prompt: string;
   taskAssets?: TaskAsset[];
   inputAssets?: CandidatePromptInputAssets;
+  /** Phase-2 scaffold for model-specific video field aliases (not used in phase-1 T2V rollout). */
+  videoInputProfile?: VideoInputProfile;
 }
 
 /**

@@ -119,6 +119,14 @@ describe('Modality Test Matrix', () => {
       expect(assets[0].type).toBe('video');
       expect((assets[0] as { url: string }).url).toBe('https://out.com/v.mp4');
     });
+
+    it('text-to-video: nested video object output → OutputAsset[]', () => {
+      const raw = { video: { url: 'https://out.com/nested.mp4' } };
+      const assets = convertFalAIOutputToOutputAssets(raw, TEXT_TO_VIDEO_SPEC);
+      expect(assets).toHaveLength(1);
+      expect(assets[0].type).toBe('video');
+      expect((assets[0] as { url: string }).url).toBe('https://out.com/nested.mp4');
+    });
   });
 
   describe('EachLabs convertToOutputAssets (image-to-video)', () => {
@@ -155,8 +163,8 @@ describe('Modality Test Matrix', () => {
       expect(supportsModality('falai', 'text-to-video')).toBe(true);
     });
 
-    it('eachlabs supports image-to-video', () => {
-      expect(supportsModality('eachlabs', 'image-to-video')).toBe(true);
+    it('eachlabs defers image-to-video in phase-1 rollout', () => {
+      expect(supportsModality('eachlabs', 'image-to-video')).toBe(false);
     });
   });
 

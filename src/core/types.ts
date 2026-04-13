@@ -20,6 +20,8 @@ export interface TaskAsset {
 export interface TaskSpec {
   goal: string;
   modality: Modality;
+  /** Optional generation setting selected by user when supported by model schema. */
+  aspectRatio?: string;
   /** Input assets for multi-modal tasks (image-to-image, image-to-video, video-to-video) */
   assets?: TaskAsset[];
   /**

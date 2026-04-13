@@ -16,7 +16,7 @@ describe('provider-capabilities', () => {
     it('returns capability for eachlabs', () => {
       const cap = getProviderCapability('eachlabs');
       expect(cap.supports.textToImage).toBe(true);
-      expect(cap.supports.videoToVideo).toBe(true);
+      expect(cap.supports.videoToVideo).toBe(false);
     });
 
     it('returns capability with all support keys', () => {
@@ -31,9 +31,9 @@ describe('provider-capabilities', () => {
     it('returns true for supported modalities (falai)', () => {
       expect(supportsModality('falai', 'text-to-image')).toBe(true);
       expect(supportsModality('falai', 'image-to-image')).toBe(true);
-      expect(supportsModality('falai', 'image-to-video')).toBe(true);
+      expect(supportsModality('falai', 'image-to-video')).toBe(false);
       expect(supportsModality('falai', 'text-to-video')).toBe(true);
-      expect(supportsModality('falai', 'video-to-video')).toBe(true);
+      expect(supportsModality('falai', 'video-to-video')).toBe(false);
       expect(supportsModality('falai', 'text-to-text')).toBe(true);
     });
 

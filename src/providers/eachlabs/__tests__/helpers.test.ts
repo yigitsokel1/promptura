@@ -2,7 +2,13 @@
  * Unit tests for EachLabs helpers (modality, required_assets from request_schema).
  */
 
-import { eachLabsRequiredAssets, eachLabsModality, eachLabsRequiredInputDefaults } from '../helpers';
+import {
+  eachLabsRequiredAssets,
+  eachLabsModality,
+  eachLabsRequiredInputDefaults,
+  eachLabsAspectRatioOptions,
+  eachLabsAspectRatioDefault,
+} from '../helpers';
 import type { EachLabsModelDetail } from '../types';
 
 function detail(overrides: Partial<EachLabsModelDetail> = {}): EachLabsModelDetail {
@@ -165,17 +171,21 @@ describe('eachLabsRequiredInputDefaults', () => {
     ).toEqual({ quality: 'medium' });
   });
 
-  it('uses known fallback for quality and duration when no schema default', () => {
+  it('uses known fallback for quality, duration, and aspect_ratio when no schema default', () => {
     expect(
       eachLabsRequiredInputDefaults(
         detail({
           request_schema: {
-            required: ['quality', 'duration'],
-            properties: { quality: { type: 'string' }, duration: { type: 'number' } },
+            required: ['quality', 'duration', 'aspect_ratio'],
+            properties: {
+              quality: { type: 'string' },
+              duration: { type: 'number' },
+              aspect_ratio: { type: 'string' },
+            },
           },
         })
       )
-    ).toEqual({ quality: 'high', duration: 5 });
+    ).toEqual({ quality: 'high', duration: 5, aspect_ratio: '16:9' });
   });
 
   it('includes only required keys we have a default for', () => {
@@ -189,5 +199,56 @@ describe('eachLabsRequiredInputDefaults', () => {
         })
       )
     ).toEqual({ quality: 'high' });
+  });
+});
+
+describe('eachLabsAspectRatio schema helpers', () => {
+  it('returns enum options when aspect_ratio has enum', () => {
+    const options = eachLabsAspectRatioOptions(
+      detail({
+        request_schema: {
+          properties: {
+            aspect_ratio: { type: 'string', enum: ['16:9', '9:16', '1:1'] },
+          },
+        },
+      })
+    );
+    expect(options).toEqual(['16:9', '9:16', '1:1']);
+  });
+
+  it('returns default when aspect_ratio has default', () => {
+    const def = eachLabsAspectRatioDefault(
+      detail({
+        request_schema: {
+          properties: {
+            aspect_ratio: { type: 'string', default: '16:9' },
+          },
+        },
+      })
+    );
+    expect(def).toBe('16:9');
+  });
+
+  it('supports camelCase aspectRatio key', () => {
+    const options = eachLabsAspectRatioOptions(
+      detail({
+        request_schema: {
+          properties: {
+            aspectRatio: { type: 'string', enum: ['16:9', '1:1'], default: '1:1' },
+          },
+        },
+      })
+    );
+    const def = eachLabsAspectRatioDefault(
+      detail({
+        request_schema: {
+          properties: {
+            aspectRatio: { type: 'string', enum: ['16:9', '1:1'], default: '1:1' },
+          },
+        },
+      })
+    );
+    expect(options).toEqual(['16:9', '1:1']);
+    expect(def).toBe('1:1');
   });
 });

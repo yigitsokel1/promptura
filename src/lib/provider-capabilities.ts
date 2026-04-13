@@ -22,9 +22,9 @@ const FALAI_CAPABILITY: ProviderCapability = {
     textToText: true,
     textToImage: true,
     imageToImage: true,
-    imageToVideo: true,
+    imageToVideo: false,
     textToVideo: true,
-    videoToVideo: true,
+    videoToVideo: false,
   },
 };
 
@@ -33,9 +33,9 @@ const EACHLABS_CAPABILITY: ProviderCapability = {
     textToText: true,
     textToImage: true,
     imageToImage: true,
-    imageToVideo: true,
+    imageToVideo: false,
     textToVideo: true,
-    videoToVideo: true,
+    videoToVideo: false,
   },
 };
 

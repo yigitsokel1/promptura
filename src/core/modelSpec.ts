@@ -1,7 +1,7 @@
 /**
- * ModelSpec types (Sprint 7 — param-free).
- * Spec holds only: modality, required_assets, prompt_guidelines, optional summary.
- * No inputs[], outputs, enums, min/max, or default.
+ * ModelSpec types (Sprint 7 — mostly param-free).
+ * Spec holds modality/required_assets/guidelines plus minimal safe execution hints
+ * (e.g. required_input_defaults, optional aspect ratio options/default).
  */
 
 import type { Modality } from '@/src/core/types';
@@ -25,6 +25,10 @@ export interface ModelSpec {
    * Filled at research from provider request_schema; only that provider uses these at execution.
    */
   required_input_defaults?: Record<string, unknown>;
+  /** Optional aspect ratio options parsed from provider schema for text-to-video UX. */
+  aspect_ratio_options?: string[];
+  /** Optional provider/default aspect ratio (e.g. 16:9). */
+  aspect_ratio_default?: string;
 }
 
 /**

@@ -88,7 +88,7 @@ Models are discovered and validated through a multi-step process:
 1. **Validation**: Users can validate fal.ai model endpoints via the Playground. The system checks if the endpoint exists in fal.ai's API.
 2. **Research**: Once validated, a research job is automatically created. Gemini analyzes the model's metadata, documentation, and capabilities to generate a normalized `ModelSpec`.
 3. **Normalization**: The `ModelSpec` is param-free and includes:
-   - **modality**: e.g. text-to-image, image-to-video, text-to-video
+   - **modality**: e.g. text-to-image, text-to-video
    - **required_assets**: none | image | video | image+video
    - **prompt_guidelines**: actionable tips for prompt writing
    - **summary** (optional): how the model works
@@ -153,7 +153,7 @@ Then re-add models via Playground or Admin. Recommended endpoints:
 | fal.ai | text-to-image | `fal-ai/flux/dev` |
 | fal.ai | image-to-image | `fal-ai/flux/dev/image-to-image` |
 | fal.ai | text-to-video | `fal-ai/minimax-video-01` |
-| eachlabs | image-to-video | `nano-banana-pro-edit` |
+| eachlabs | text-to-video | `haiper-video-2` |
 
 ### Error Handling
 
@@ -194,4 +194,14 @@ The admin panel (`/admin/models`) provides model management capabilities:
 
 ## Status
 Sprint 4 – Stabilization, quality, observability. Iteration loop and Gemini-as-prompter are fixed (see ADR-003, ADR-004).
+
+## Video rollout scope
+
+- **Phase-1 (current)**: `text-to-video` only (fal.ai + EachLabs).
+- **Deferred to Phase-2**: `image-to-video` and `video-to-video`.
+- **Reason**: model input schemas vary significantly (`image_url`, `first_frame_url`, `start_image_url`, etc.), so we are introducing a profile-based adapter before enabling those modalities.
+- **Planned Phase-2 adapter**:
+  - Canonical fields: `primaryImage`, `firstFrame`, `lastFrame`, `firstClip`
+  - Per-model mapping from canonical fields to provider-specific keys
+  - Runtime validation of required profile fields before submit
 

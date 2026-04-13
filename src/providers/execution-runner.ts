@@ -78,6 +78,9 @@ export class ExecutionRunnerAdapter implements ProviderAdapter {
             modelSpec,
             taskInputs
           );
+          if (typeof task.aspectRatio === 'string' && task.aspectRatio.length > 0) {
+            payload.aspect_ratio = task.aspectRatio;
+          }
 
           // Log payload keys for debugging (avoid dumping large values)
           const payloadKeys = Object.keys(payload);

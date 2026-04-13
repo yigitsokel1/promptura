@@ -70,7 +70,8 @@ function cleanInput(input: Record<string, unknown>): Record<string, unknown> {
  */
 function applyEachLabsInputDefaults(
   input: Record<string, unknown>,
-  requiredInputDefaults?: Record<string, unknown>
+  requiredInputDefaults?: Record<string, unknown>,
+  endpointId?: string
 ): void {
   if (requiredInputDefaults && Object.keys(requiredInputDefaults).length > 0) {
     for (const [key, value] of Object.entries(requiredInputDefaults)) {
@@ -80,6 +81,20 @@ function applyEachLabsInputDefaults(
   }
   if (input.quality === undefined) input.quality = 'high';
   if (input.duration === undefined) input.duration = 5;
+  const id = (endpointId ?? '').toLowerCase();
+  const NEEDS_ASPECT_RATIO_DEFAULT: ReadonlySet<string> = new Set([
+    'kling-o3-pro-text-to-video',
+  ]);
+  const hasFrameOrMediaInput =
+    input.image_url !== undefined ||
+    input.first_frame_url !== undefined ||
+    input.last_frame_url !== undefined ||
+    input.start_image_url !== undefined ||
+    input.end_image_url !== undefined ||
+    input.video_url !== undefined;
+  if (NEEDS_ASPECT_RATIO_DEFAULT.has(id) && !hasFrameOrMediaInput && input.aspect_ratio === undefined) {
+    input.aspect_ratio = '16:9';
+  }
 }
 
 function mapStatus(
@@ -126,6 +141,27 @@ function formatEachLabsError(
   return `EachLabs API error: ${status} ${statusText}${hasDetail ? ` - ${trimmed}` : ''}`;
 }
 
+function toShortErrorString(value: unknown): string | undefined {
+  if (typeof value === 'string') {
+    const trimmed = value.trim();
+    return trimmed.length > 0 ? trimmed : undefined;
+  }
+  if (!value || typeof value !== 'object') return undefined;
+  const obj = value as Record<string, unknown>;
+  const nested =
+    toShortErrorString(obj.message) ??
+    toShortErrorString(obj.detail) ??
+    toShortErrorString(obj.reason) ??
+    toShortErrorString(obj.error);
+  if (nested) return nested;
+  try {
+    const text = JSON.stringify(obj);
+    return text.length > 400 ? `${text.slice(0, 400)}...` : text;
+  } catch {
+    return undefined;
+  }
+}
+
 export class EachLabsExecutionProvider implements ExecutionProvider {
   constructor(private apiKey: string) {}
 
@@ -158,7 +194,7 @@ export class EachLabsExecutionProvider implements ExecutionProvider {
   ): Promise<string> {
     const version = await fetchEachLabsModelVersion(endpointId, this.apiKey);
     const input = cleanInput(payload);
-    applyEachLabsInputDefaults(input, options?.requiredInputDefaults);
+    applyEachLabsInputDefaults(input, options?.requiredInputDefaults, endpointId);
     const body = {
       model: endpointId,
       version,
@@ -296,13 +332,19 @@ export class EachLabsExecutionProvider implements ExecutionProvider {
 
     const status = data.status ?? 'running';
     const failed = status === 'error' || status === 'cancelled';
+    const outputObj = data.output && typeof data.output === 'object'
+      ? (data.output as Record<string, unknown>)
+      : undefined;
     const errorText =
-      data.error ??
-      data.message ??
-      data.detail ??
-      data.reason ??
+      toShortErrorString(data.error) ??
+      toShortErrorString(data.message) ??
+      toShortErrorString(data.detail) ??
+      toShortErrorString(data.reason) ??
+      toShortErrorString(outputObj?.error) ??
+      toShortErrorString(outputObj?.message) ??
+      toShortErrorString(outputObj?.detail) ??
       (failed
-        ? 'Job failed (no details from EachLabs). Often due to request size limit — use a video URL or a shorter clip.'
+        ? `Job failed on EachLabs (predictionId: ${predictionId}, status: ${status}) with no error details. This is often request size/model-side validation; use a video URL or a shorter clip, then retry.`
         : undefined);
     return {
       status,

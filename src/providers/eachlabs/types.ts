@@ -13,7 +13,16 @@ export interface EachLabsModelDetail {
     required?: string[];
     properties?: Record<
       string,
-      { type?: string; format?: string; minLength?: number; maxLength?: number; minimum?: number; maximum?: number; default?: unknown }
+      {
+        type?: string;
+        format?: string;
+        minLength?: number;
+        maxLength?: number;
+        minimum?: number;
+        maximum?: number;
+        default?: unknown;
+        enum?: unknown[];
+      }
     >;
   };
 }

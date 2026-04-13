@@ -13,13 +13,21 @@ import {
   eachLabsDetailToFalMetadata,
   eachLabsModality,
   eachLabsRequiredInputDefaults,
+  eachLabsAspectRatioOptions,
+  eachLabsAspectRatioDefault,
 } from '@/src/providers/eachlabs/helpers';
 import type { EachLabsModelDetail } from '@/src/providers/eachlabs/types';
 import type { Modality } from '@/src/core/types';
 import type { ModelSpec, RequiredAssets } from '@/src/core/modelSpec';
-import { determineModalityFromCategory, getFalOpenApiInputPropertyKeys, getFalRequiredInputDefaults } from '@/src/providers/falai/helpers';
+import {
+  determineModalityFromCategory,
+  getFalOpenApiInputPropertyKeys,
+  getFalRequiredInputDefaults,
+  getFalAspectRatioConfig,
+} from '@/src/providers/falai/helpers';
 import { combineOutputAndAssetsToModality } from '@/src/lib/modality-inference';
 import { analyzeSchemaForAssets } from '@/src/lib/schema-asset-analyzer';
+import { isDeferredVideoModality } from '@/src/lib/video-rollout';
 
 const MAX_CONCURRENT_RESEARCH = 2;
 const MAX_RETRIES = 3;
@@ -284,12 +292,26 @@ export async function runResearchJob(researchJobId: string): Promise<void> {
       : modelEndpoint.source === 'fal.ai'
         ? await getFalRequiredInputDefaults(modelEndpoint.endpointId)
         : undefined;
+    const falAspectConfig = modelEndpoint.source === 'fal.ai'
+      ? (await getFalAspectRatioConfig(modelEndpoint.endpointId)) ?? { options: [], default: undefined }
+      : { options: [], default: undefined as string | undefined };
+    const aspectRatioOptionsRaw = eachLabsDetail
+      ? eachLabsAspectRatioOptions(eachLabsDetail)
+      : falAspectConfig.options;
+    const aspectRatioOptions = Array.isArray(aspectRatioOptionsRaw)
+      ? aspectRatioOptionsRaw.filter((v): v is string => typeof v === 'string' && v.length > 0)
+      : [];
+    const aspectRatioDefault = eachLabsDetail
+      ? eachLabsAspectRatioDefault(eachLabsDetail)
+      : falAspectConfig.default;
     const modelSpec: ModelSpec = {
       modality,
       required_assets,
       prompt_guidelines: guidelines.prompt_guidelines,
       summary: guidelines.summary,
       detected_input_fields,
+      ...(aspectRatioOptions.length > 0 ? { aspect_ratio_options: aspectRatioOptions } : {}),
+      ...(aspectRatioDefault ? { aspect_ratio_default: aspectRatioDefault } : {}),
       ...(required_input_defaults && Object.keys(required_input_defaults).length > 0
         ? { required_input_defaults }
         : {}),
@@ -308,7 +330,10 @@ export async function runResearchJob(researchJobId: string): Promise<void> {
 
     await prisma.modelEndpoint.update({
       where: { id: modelEndpoint.id },
-      data: { status: 'active', lastCheckedAt: new Date() },
+      data: {
+        status: isDeferredVideoModality(modality) ? 'disabled' : 'active',
+        lastCheckedAt: new Date(),
+      },
     });
 
     await prisma.researchJob.update({

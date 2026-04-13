@@ -138,7 +138,7 @@ describe('POST /api/models/validate', () => {
     
     // Mock extractModelMetadata to return modality and kind
     (extractModelMetadata as jest.Mock).mockReturnValue({
-      modality: 'image',
+      modality: 'text-to-image',
       kind: 'model',
     });
 
@@ -182,7 +182,7 @@ describe('POST /api/models/validate', () => {
         data: expect.objectContaining({
           endpointId: 'fal-ai/flux/dev',
           kind: 'model',
-          modality: 'image',
+          modality: 'text-to-image',
           status: 'pending_research',
           addedByUserId: 'user-id',
         }),
@@ -265,7 +265,7 @@ describe('POST /api/models/validate', () => {
         data: expect.objectContaining({
           endpointId: 'nano-banana-pro-edit',
           kind: 'model',
-          modality: 'image',
+          modality: 'text-to-image',
           source: 'eachlabs',
           provider: 'eachlabs',
           status: 'pending_research',
@@ -290,5 +290,32 @@ describe('POST /api/models/validate', () => {
 
     expect(response.status).toBe(404);
     expect(data.error).toContain('Model not found in EachLabs');
+  });
+
+  it('should reject deferred video modality during validation', async () => {
+    const mockModelMetadata = {
+      endpoint_id: 'fal-ai/some-i2v',
+      metadata: { category: 'image-to-video' },
+    };
+    (prisma.modelEndpoint.findFirst as jest.Mock).mockResolvedValue(null);
+    (createFalAIClientFromEnv as jest.Mock).mockReturnValue({
+      findModel: jest.fn().mockResolvedValue(mockModelMetadata),
+    });
+    (extractModelMetadata as jest.Mock).mockReturnValue({
+      modality: 'image-to-video',
+      kind: 'model',
+    });
+
+    const response = await POST(
+      new NextRequest('http://localhost/api/models/validate', {
+        method: 'POST',
+        body: JSON.stringify({ endpointId: 'fal-ai/some-i2v' }),
+      })
+    );
+    const data = await response.json();
+
+    expect(response.status).toBe(400);
+    expect(data.code).toBe('ModalityDeferred');
+    expect(prisma.modelEndpoint.create).not.toHaveBeenCalled();
   });
 });

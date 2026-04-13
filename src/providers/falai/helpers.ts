@@ -148,8 +148,11 @@ const FAL_OPENAPI_SCHEMA_URL = 'https://fal.ai/api/openapi/queue/openapi.json';
 /** OpenAPI 3 requestBody content schema (may have $ref or inline properties). */
 type OpenApiSchema = {
   $ref?: string;
-  properties?: Record<string, { default?: unknown }>;
+  properties?: Record<string, { default?: unknown; enum?: unknown[] }>;
   required?: string[];
+  allOf?: OpenApiSchema[];
+  oneOf?: OpenApiSchema[];
+  anyOf?: OpenApiSchema[];
 };
 
 /** Resolve schema from $ref (#/components/schemas/Name) or return schema with properties. */
@@ -164,6 +167,50 @@ function resolveRequestSchema(
   const name = ref.replace(/^#\/components\/schemas\//, '');
   const resolved = components?.schemas?.[name];
   return resolved ?? undefined;
+}
+
+function resolveRef(
+  schema: OpenApiSchema | undefined,
+  components: { schemas?: Record<string, OpenApiSchema> } | undefined
+): OpenApiSchema | undefined {
+  if (!schema?.$ref || typeof schema.$ref !== 'string') return schema;
+  const name = schema.$ref.replace(/^#\/components\/schemas\//, '');
+  return components?.schemas?.[name] ?? schema;
+}
+
+function findAspectRatioInSchema(
+  schema: OpenApiSchema | undefined,
+  components: { schemas?: Record<string, OpenApiSchema> } | undefined,
+  visited = new Set<OpenApiSchema>()
+): { options: string[]; default?: string } | null {
+  if (!schema) return null;
+  const resolved = resolveRef(schema, components);
+  if (!resolved || visited.has(resolved)) return null;
+  visited.add(resolved);
+
+  const props = resolved.properties;
+  const aspectProp = props?.aspect_ratio ?? props?.aspectRatio;
+  if (aspectProp) {
+    const options = Array.isArray(aspectProp.enum)
+      ? aspectProp.enum.filter((v): v is string => typeof v === 'string' && v.trim().length > 0)
+      : [];
+    const defaultAspect = typeof aspectProp.default === 'string' ? aspectProp.default : undefined;
+    return { options, ...(defaultAspect ? { default: defaultAspect } : {}) };
+  }
+
+  for (const child of resolved.allOf ?? []) {
+    const found = findAspectRatioInSchema(child, components, visited);
+    if (found) return found;
+  }
+  for (const child of resolved.oneOf ?? []) {
+    const found = findAspectRatioInSchema(child, components, visited);
+    if (found) return found;
+  }
+  for (const child of resolved.anyOf ?? []) {
+    const found = findAspectRatioInSchema(child, components, visited);
+    if (found) return found;
+  }
+  return null;
 }
 
 export interface FalOpenApiInputSchema {
@@ -251,6 +298,34 @@ export async function getFalRequiredInputDefaults(endpointId: string): Promise<R
     return {};
   } catch {
     return {};
+  }
+}
+
+export async function getFalAspectRatioConfig(endpointId: string): Promise<{
+  options: string[];
+  default?: string;
+}> {
+  try {
+    const url = `${FAL_OPENAPI_SCHEMA_URL}?endpoint_id=${encodeURIComponent(endpointId)}`;
+    const res = await fetch(url, { headers: { Accept: 'application/json' } });
+    if (!res.ok) return { options: [] };
+    const json = (await res.json()) as {
+      paths?: Record<string, { post?: { requestBody?: { content?: Record<string, { schema?: OpenApiSchema }> } } }>;
+      components?: { schemas?: Record<string, OpenApiSchema> };
+    };
+    const paths = json?.paths ?? {};
+    const components = json?.components;
+    for (const pathItem of Object.values(paths)) {
+      const post = pathItem?.post;
+      if (!post?.requestBody?.content) continue;
+      const schema = post.requestBody.content['application/json']?.schema;
+      const resolved = resolveRequestSchema(schema, components);
+      const found = findAspectRatioInSchema(resolved, components);
+      if (found) return found;
+    }
+    return { options: [] };
+  } catch {
+    return { options: [] };
   }
 }
 
@@ -443,6 +518,17 @@ export function convertFalAIOutputToOutputAssets(
         }
         if ('video' in outputObj && typeof outputObj.video === 'string') {
           return toVideoAssets([outputObj.video]);
+        }
+        if (
+          'video' in outputObj &&
+          typeof outputObj.video === 'object' &&
+          outputObj.video !== null &&
+          'url' in (outputObj.video as Record<string, unknown>)
+        ) {
+          const nestedUrl = (outputObj.video as { url?: unknown }).url;
+          if (typeof nestedUrl === 'string' && nestedUrl.length > 0) {
+            return toVideoAssets([nestedUrl]);
+          }
         }
       }
     }

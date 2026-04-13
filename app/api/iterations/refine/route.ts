@@ -10,6 +10,8 @@ import { handleApiError } from '@/src/lib/api-helpers';
 import { buildRefineContext } from '@/src/lib/gemini/refineContext';
 import { requireAuth, unauthorizedResponse } from '@/src/lib/auth';
 import { requireUserProviderKey, type ProviderSlug } from '@/src/lib/provider-keys';
+import { supportsModality } from '@/src/lib/provider-capabilities';
+import type { ExecutionProviderSlug } from '@/src/providers/execution';
 
 interface RefineRequestBody {
   task: TaskSpec;
@@ -100,6 +102,21 @@ export async function POST(request: NextRequest) {
       provider: modelEndpoint.provider as ModelRef['provider'],
       modelId: modelEndpoint.endpointId,
     };
+
+    if (targetModel.provider === 'falai' || targetModel.provider === 'eachlabs') {
+      const providerSlug = targetModel.provider as ExecutionProviderSlug;
+      if (!supportsModality(providerSlug, task.modality)) {
+        return NextResponse.json(
+          {
+            error: `Provider ${targetModel.provider} does not support modality "${task.modality}".`,
+            code: 'ModalityNotSupported',
+            provider: targetModel.provider,
+            modality: task.modality,
+          },
+          { status: 400 }
+        );
+      }
+    }
 
     // Blok D: user provider key for falai/eachlabs
     let userApiKey: string | undefined;

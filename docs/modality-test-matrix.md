@@ -29,9 +29,11 @@ Naive heuristic (örn. `key.includes('image')`) kaldırıldı; `image_size`, `nu
 |----------|-----------------|----------|--------------------------------|
 | fal.ai   | text-to-image   | verified | prompt only, image output      |
 | fal.ai   | image-to-image  | verified | prompt + image input, image out|
-| eachlabs | image-to-video  | verified | image + prompt, video output   |
 | fal.ai   | text-to-video   | verified | prompt only, video output      |
-| eachlabs | text-to-video   | verified | capability supported           |
+| eachlabs | text-to-video   | verified | prompt only, video output      |
+| fal.ai   | image-to-video  | deferred | phase-2 profile adapter scope  |
+| fal.ai   | video-to-video  | deferred | phase-2 profile adapter scope  |
+| eachlabs | image-to-video  | deferred | phase-2 profile adapter scope  |
 
 ---
 
@@ -45,8 +47,8 @@ Aşağıdaki slug’lar `app/api/research/process/__tests__/process.test.ts` iç
 | `fal-ai/flux-pro/v1.1/image-to-image` | fal.ai | image-to-image | image | prompt, image_url (required) |
 | `fal-ai/flux-pro/v1.1/image-to-image` (init) | fal.ai | image-to-image | image | prompt, init_image, num_steps |
 | `fal-ai/flux/inpaint` | fal.ai | image-to-image | image | prompt, image_url, mask_image_url |
-| `fal-ai/minimax/video-01` | fal.ai | image-to-video | image | prompt, image_url, motion_bucket_id |
-| `fal-ai/kling-video/v1.6/video-to-video` | fal.ai | video-to-video | video | prompt, video_url |
+| `fal-ai/minimax/video-01` | fal.ai | image-to-video | image | deferred in phase-1 rollout |
+| `fal-ai/kling-video/v1.6/video-to-video` | fal.ai | video-to-video | video | deferred in phase-1 rollout |
 | `fal-ai/recraft-v3` | fal.ai | text-to-image | image (optional fallback) | prompt, image_url, num_steps; required: [prompt] |
 | `eachlabs/stable-diffusion` | eachlabs | text-to-image | none | prompt, num_inference_steps |
 | `eachlabs/image-editor` | eachlabs | image-to-image | image | prompt, image_url (required) |
