@@ -82,6 +82,13 @@ export async function POST(request: NextRequest) {
       if (res.status === 401 || res.status === 403) {
         return NextResponse.json({ ok: false, error: 'Invalid Gemini API key.' });
       }
+      if (res.status === 429) {
+        return NextResponse.json({
+          ok: false,
+          error: 'Gemini quota/rate limit exceeded (429 RESOURCE_EXHAUSTED). API key is reachable, but quota is exhausted right now.',
+          code: 'QuotaExceeded',
+        });
+      }
       if (!res.ok) {
         return NextResponse.json({
           ok: false,

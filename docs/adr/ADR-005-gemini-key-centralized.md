@@ -18,7 +18,7 @@ Prompt generation (candidate prompts and refine) uses a **single, server-side Ge
 - Generate (Gemini produces N candidate prompts from task + ModelSpec).
 - Refine (Gemini produces M prompts from task + selected prompts + notes + output summaries).
 
-Users do **not** supply or manage a Gemini key. Execution providers (fal.ai, EachLabs) use **per-user** keys (see README “User API Keys”).
+Users do **not** supply or manage a Gemini key for admin research. Execution providers (fal.ai, EachLabs) use **per-user** keys (see [docs/setup.md](../setup.md#provider-keys)).
 
 ---
 
@@ -59,6 +59,7 @@ Users do **not** supply or manage a Gemini key. Execution providers (fal.ai, Eac
 
 ## References
 
-- README: [User API Keys](README.md#user-api-keys), [Multi-provider architecture](README.md#multi-provider-architecture)
+- README: [System capabilities](../../README.md#system-capabilities)
+- Setup: [Provider keys](../setup.md#provider-keys), [Model catalog](../setup.md#model-catalog)
 - ADR-002: Gemini Research Pipeline  
 - ADR-004: Iteration and Refine Design (Gemini as single prompt creator)

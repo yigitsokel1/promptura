@@ -50,5 +50,6 @@ ModelSpec and the execution payload contain **no model parameters** (no aspect_r
 ## Related documents
 
 - **ADR-004:** Iteration and Refine Design (task-based loop, Gemini as prompt creator).
-- **README:** How Promptura works; Model discovery (param-free research flow).
+- **README:** [How it works](../../README.md#how-it-works), [Architecture decisions](../../README.md#architecture-decisions)
+- **Setup:** [Model catalog](../setup.md#model-catalog)
 - **Architecture:** ModelSpec and execution payload as single source of truth; no param forms in UI.

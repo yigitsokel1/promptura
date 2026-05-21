@@ -28,10 +28,56 @@ export interface GeminiConfig {
 export class GeminiAdapter implements ProviderAdapter {
   private apiKey: string;
   private baseUrl: string;
+  private static readonly MAX_RETRIES = 3;
 
   constructor(config: GeminiConfig) {
     this.apiKey = config.apiKey;
     this.baseUrl = config.baseUrl || 'https://generativelanguage.googleapis.com';
+  }
+
+  private async sleep(ms: number): Promise<void> {
+    await new Promise((resolve) => setTimeout(resolve, ms));
+  }
+
+  private parseRetryAfterMs(retryAfter: string | null): number | undefined {
+    if (!retryAfter) return undefined;
+    const sec = Number.parseInt(retryAfter, 10);
+    if (!Number.isNaN(sec) && sec > 0) return sec * 1000;
+    return undefined;
+  }
+
+  private async callGeminiWithRetry(
+    url: string,
+    requestBody: unknown,
+    timeoutMs: number
+  ): Promise<Response> {
+    for (let attempt = 0; attempt <= GeminiAdapter.MAX_RETRIES; attempt++) {
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+      try {
+        const response = await fetch(url, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(requestBody),
+          signal: controller.signal,
+        });
+        clearTimeout(timeoutId);
+
+        const isRetriable = response.status === 429 || response.status >= 500;
+        if (!isRetriable || attempt === GeminiAdapter.MAX_RETRIES) return response;
+
+        const retryAfterMs = this.parseRetryAfterMs(response.headers.get('retry-after'));
+        const backoffMs = retryAfterMs ?? Math.min(8000, 1000 * Math.pow(2, attempt));
+        await this.sleep(backoffMs);
+        continue;
+      } catch (err) {
+        clearTimeout(timeoutId);
+        const isAbort = err instanceof Error && err.name === 'AbortError';
+        if (attempt === GeminiAdapter.MAX_RETRIES || !isAbort) throw err;
+        await this.sleep(Math.min(8000, 1000 * Math.pow(2, attempt)));
+      }
+    }
+    throw new Error('Gemini request failed after retries');
   }
 
   /**
@@ -112,21 +158,16 @@ export class GeminiAdapter implements ProviderAdapter {
         60_000,
         parseInt(process.env.GEMINI_REQUEST_TIMEOUT_MS ?? '300000', 10) || 300000
       );
-      const controller = new AbortController();
-      const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
-
-      const response = await fetch(url, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(requestBody),
-        signal: controller.signal,
-      });
-
-      clearTimeout(timeoutId);
+      const response = await this.callGeminiWithRetry(url, requestBody, timeoutMs);
 
       if (!response.ok) {
         const errorText = await response.text();
         console.log(`[Gemini] requestId=${geminiRequestId} response error ${response.status}`);
+        if (response.status === 429) {
+          throw new Error(
+            'Gemini API rate limit/quota exceeded (429 RESOURCE_EXHAUSTED). Check your Gemini billing/quota, wait briefly, or switch to a key with higher limits.'
+          );
+        }
         throw new Error(`Gemini API error: ${response.status} ${response.statusText} - ${errorText}`);
       }
 
@@ -218,20 +259,15 @@ export class GeminiAdapter implements ProviderAdapter {
 
     try {
       const timeoutMs = Math.max(60_000, parseInt(process.env.GEMINI_REQUEST_TIMEOUT_MS ?? '300000', 10) || 300000);
-      const controller = new AbortController();
-      const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
-
-      const response = await fetch(url, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(requestBody),
-        signal: controller.signal,
-      });
-
-      clearTimeout(timeoutId);
+      const response = await this.callGeminiWithRetry(url, requestBody, timeoutMs);
 
       if (!response.ok) {
         const errorText = await response.text();
+        if (response.status === 429) {
+          throw new Error(
+            'Gemini API rate limit/quota exceeded (429 RESOURCE_EXHAUSTED). Check project quota and billing in Google Cloud.'
+          );
+        }
         throw new Error(`Gemini API error: ${response.status} ${response.statusText} - ${errorText}`);
       }
 
